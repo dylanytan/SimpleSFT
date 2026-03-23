@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simplesft"
+version = "0.1.0"
+description = "Measure and estimate peak memory use for simple SFT workflows."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "pydantic>=2,<3",
+  "torch>=2.0",
+  "transformers>=4.40",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+]
+lora = [
+  "peft>=0.10",
+]
+zero2 = [
+  "deepspeed>=0.14",
+]
+
+[project.scripts]
+simplesft = "simplesft.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
