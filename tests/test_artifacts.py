@@ -3,7 +3,12 @@
 from pathlib import Path
 
 from simplesft.artifacts import load_memory_result, save_memory_result
-from simplesft.types import MemoryComponentBreakdown, MemoryResult, PhaseMemoryRecord, TrainingConfig
+from simplesft.types import (
+    MemoryComponentBreakdown,
+    MemoryResult,
+    PhaseMemoryRecord,
+    TrainingConfig,
+)
 
 
 def test_memory_result_roundtrip(tmp_path: Path) -> None:
@@ -36,4 +41,3 @@ def test_memory_result_roundtrip(tmp_path: Path) -> None:
     loaded_result = load_memory_result(path=artifact_path)
     assert loaded_result.global_peak_bytes == result.global_peak_bytes
     assert loaded_result.breakdown.parameter_bytes == 123
-

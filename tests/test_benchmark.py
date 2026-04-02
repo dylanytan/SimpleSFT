@@ -55,3 +55,22 @@ def test_run_benchmark_suite_saves_suite_index(tmp_path: Path) -> None:
     assert comparisons == []
     assert (tmp_path / "suite_index.json").exists()
 
+
+def test_build_default_benchmark_cases_applies_optimizer_specific_overrides() -> None:
+    """Benchmark cases should accept per-optimizer config overrides."""
+
+    cases = build_default_benchmark_cases(
+        model=_toy_model_spec(),
+        seq_lens=(16,),
+        micro_batches=(1,),
+        tuning_modes=("full_ft",),
+        distributed_modes=("single_gpu",),
+        optimizer_names=("sgd", "adamw"),
+        optimizer_overrides_by_name={
+            "sgd": {"optimizer_momentum": 0.9},
+            "adamw": {"optimizer_beta1": 0.8},
+        },
+    )
+    case_by_optimizer = {case.config.optimizer_name: case for case in cases}
+    assert case_by_optimizer["sgd"].config.optimizer_momentum == 0.9
+    assert case_by_optimizer["adamw"].config.optimizer_beta1 == 0.8

@@ -50,7 +50,9 @@ def _memory_result(*, global_peak_bytes: int) -> MemoryResult:
         ),
         phase_records=(
             _phase_record(phase_name="forward", reserved_bytes=global_peak_bytes - 1),
-            _phase_record(phase_name="optimizer_step", reserved_bytes=global_peak_bytes),
+            _phase_record(
+                phase_name="optimizer_step", reserved_bytes=global_peak_bytes
+            ),
         ),
         peak_phase="optimizer_step",
         global_peak_bytes=global_peak_bytes,
@@ -62,7 +64,10 @@ def test_aggregate_rank_results_uses_max_across_ranks() -> None:
     """DDP aggregation should take a conservative max across ranks."""
 
     aggregated = aggregate_rank_results(
-        results=[_memory_result(global_peak_bytes=10), _memory_result(global_peak_bytes=12)]
+        results=[
+            _memory_result(global_peak_bytes=10),
+            _memory_result(global_peak_bytes=12),
+        ]
     )
     assert aggregated.global_peak_bytes == 12
     assert aggregated.metadata["aggregated_across_ranks"] is True

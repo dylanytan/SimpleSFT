@@ -59,3 +59,43 @@ def build_workspace_proxy_metadata(
         "backward_workspace_proxy_bytes": backward_workspace_bytes,
         "optimizer_workspace_proxy_bytes": optimizer_workspace_bytes,
     }
+
+
+def build_reserved_carryover_metadata(
+    *,
+    phase_records: tuple[PhaseMemoryRecord, ...] | list[PhaseMemoryRecord],
+) -> dict[str, int]:
+    """Build reserved-memory carry-over metrics between phase boundaries.
+
+    Args:
+        phase_records: Ordered phase records for a measured or estimated step.
+
+    Returns:
+        Mapping with reserved-over-allocated carry-over bytes for key transitions.
+
+    Example:
+        >>> records = [
+        ...     PhaseMemoryRecord(phase_name="forward", allocated_bytes=10, reserved_bytes=12),
+        ...     PhaseMemoryRecord(phase_name="loss_materialization", allocated_bytes=9, reserved_bytes=11),
+        ... ]
+        >>> build_reserved_carryover_metadata(phase_records=records)["reserved_carryover_to_loss_materialization_bytes"]
+        2
+    """
+
+    phase_by_name = {record.phase_name: record for record in phase_records}
+    target_phases = (
+        "loss_materialization",
+        "backward",
+        "optimizer_step",
+        "zero_grad",
+        "step_end",
+    )
+    return {
+        f"reserved_carryover_to_{phase_name}_bytes": max(
+            0,
+            phase_by_name[phase_name].reserved_bytes
+            - phase_by_name[phase_name].allocated_bytes,
+        )
+        for phase_name in target_phases
+        if phase_name in phase_by_name
+    }

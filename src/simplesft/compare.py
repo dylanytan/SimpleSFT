@@ -20,17 +20,46 @@ def _component_dict(breakdown: MemoryComponentBreakdown) -> dict[str, int]:
 
 
 def _workspace_proxy_dict(result: MemoryResult) -> dict[str, int]:
-    """Return workspace-proxy metadata exposed by measurement and estimation."""
+    """Return workspace-like metadata exposed by measurement and estimation."""
 
+    metadata = result.comparable_metadata()
     workspace_keys = (
+        "attention_forward_workspace_bytes",
+        "backward_kernel_workspace_bytes",
+        "recompute_workspace_bytes",
+        "optimizer_update_workspace_bytes",
+        "ddp_reducer_bucket_bytes",
+        "ddp_comm_overlap_bytes",
+        "zero_fetch_window_bytes",
+        "zero_update_window_bytes",
+        "zero_comm_window_bytes",
+        "tensor_parallel_comm_window_bytes",
+        "sequence_parallel_comm_window_bytes",
         "forward_workspace_proxy_bytes",
         "backward_workspace_proxy_bytes",
         "optimizer_workspace_proxy_bytes",
     )
-    return {
-        key: int(result.metadata.get(key, 0))
-        for key in workspace_keys
-    }
+    return {key: int(metadata.get(key, 0)) for key in workspace_keys}
+
+
+def _intermediate_term_dict(result: MemoryResult) -> dict[str, int]:
+    """Return comparable non-additive metadata terms from a result."""
+
+    metadata = result.comparable_metadata()
+    metadata_keys = (
+        "hook_visible_activation_bytes",
+        "saved_linear_input_bytes",
+        "residual_norm_bytes",
+        "checkpoint_boundary_bytes",
+        "attention_saved_bytes",
+        "loss_state_bytes",
+        "lora_low_rank_bytes",
+        "expanded_query_saved_bytes",
+        "forward_phase_activation_bytes",
+        "backward_phase_activation_bytes",
+        "backward_end_state_bytes",
+    )
+    return {key: int(metadata[key]) for key in metadata_keys if key in metadata}
 
 
 def _relative_error(measured_value: int, estimated_value: int) -> float:
@@ -73,14 +102,18 @@ def compare_measurement_to_estimate(
     """
 
     measured_by_phase = {
-        record.phase_name: record.peak_reserved_bytes for record in measured.phase_records
+        record.phase_name: record.peak_reserved_bytes
+        for record in measured.phase_records
     }
     estimated_by_phase = {
-        record.phase_name: record.peak_reserved_bytes for record in estimated.phase_records
+        record.phase_name: record.peak_reserved_bytes
+        for record in estimated.phase_records
     }
     phase_names = sorted(set(measured_by_phase) | set(estimated_by_phase))
     phase_peak_error_bytes = {
-        phase_name: abs(measured_by_phase.get(phase_name, 0) - estimated_by_phase.get(phase_name, 0))
+        phase_name: abs(
+            measured_by_phase.get(phase_name, 0) - estimated_by_phase.get(phase_name, 0)
+        )
         for phase_name in phase_names
     }
     phase_peak_relative_error = {
@@ -94,6 +127,9 @@ def compare_measurement_to_estimate(
     estimated_components = _component_dict(breakdown=estimated.breakdown)
     measured_workspace = _workspace_proxy_dict(result=measured)
     estimated_workspace = _workspace_proxy_dict(result=estimated)
+    measured_terms = _intermediate_term_dict(result=measured)
+    estimated_terms = _intermediate_term_dict(result=estimated)
+    intermediate_term_names = sorted(set(measured_terms) & set(estimated_terms))
     component_error_bytes = {
         key: abs(measured_components.get(key, 0) - estimated_components.get(key, 0))
         for key in measured_components
@@ -115,6 +151,17 @@ def compare_measurement_to_estimate(
             estimated_value=estimated_workspace.get(key, 0),
         )
         for key in measured_workspace
+    }
+    intermediate_term_error_bytes = {
+        key: abs(measured_terms.get(key, 0) - estimated_terms.get(key, 0))
+        for key in intermediate_term_names
+    }
+    intermediate_term_relative_error = {
+        key: _relative_error(
+            measured_value=measured_terms.get(key, 0),
+            estimated_value=estimated_terms.get(key, 0),
+        )
+        for key in intermediate_term_names
     }
     notes = []
     if estimated.global_peak_bytes < measured.global_peak_bytes:
@@ -140,12 +187,16 @@ def compare_measurement_to_estimate(
         component_relative_error=component_relative_error,
         workspace_proxy_error_bytes=workspace_proxy_error_bytes,
         workspace_proxy_relative_error=workspace_proxy_relative_error,
+        intermediate_term_error_bytes=intermediate_term_error_bytes,
+        intermediate_term_relative_error=intermediate_term_relative_error,
         benchmark_metadata={
             "tuning_mode": measured.config.tuning_mode,
+            "optimizer_name": measured.config.optimizer_name,
             "distributed_mode": measured.config.distributed_mode,
             "sequence_length": measured.config.max_seq_len,
             "micro_batch_size_per_gpu": measured.config.micro_batch_size_per_gpu,
             "attention_backend": measured.config.attention_backend,
+            "gradient_checkpointing": measured.config.gradient_checkpointing,
         },
         notes=tuple(notes),
     )

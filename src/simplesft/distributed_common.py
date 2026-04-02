@@ -9,7 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .artifacts import _load_model_spec, _load_training_config
+from .artifacts import _load_measurement_config, _load_model_spec
 from .topology import maybe_apply_cross_numa_nccl_env
 from .types import ModelSpec, TrainingConfig
 
@@ -36,7 +36,7 @@ def load_request(*, path: str | Path) -> tuple[str | ModelSpec, TrainingConfig]:
     model: str | ModelSpec = model_payload
     if isinstance(model_payload, dict):
         model = _load_model_spec(raw=model_payload)
-    return model, _load_training_config(raw=raw["config"])
+    return model, _load_measurement_config(raw=raw["config"])
 
 
 def torchrun_command(
@@ -67,5 +67,10 @@ def build_torchrun_env() -> tuple[dict[str, str], bool, str]:
     """Build the subprocess environment for distributed measurement launches."""
 
     launch_env = dict(os.environ)
+    triton_cache_dir = (
+        Path("/tmp") / os.environ.get("USER", "simplesft") / "triton-cache"
+    )
+    triton_cache_dir.mkdir(parents=True, exist_ok=True)
+    launch_env["TRITON_CACHE_DIR"] = str(triton_cache_dir)
     applied, reason = maybe_apply_cross_numa_nccl_env(env=launch_env)
     return launch_env, applied, reason

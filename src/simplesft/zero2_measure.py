@@ -1,4 +1,4 @@
-"""Runtime measurement helpers for DeepSpeed ZeRO-2."""
+"""Runtime measurement helpers for DeepSpeed ZeRO stage 2/3."""
 
 from __future__ import annotations
 
@@ -19,23 +19,24 @@ from .measure import (
     _make_synthetic_batch,
     _optimizer_state_bytes,
     _phase_record,
+    _runtime_attention_implementation,
 )
 from .types import MemoryResult, ModelSpec, PhaseMemoryRecord, TrainingConfig
 from .utils import maybe_get_deepspeed
 
 
 def _zero2_precision_config(*, config: TrainingConfig) -> dict[str, dict[str, bool]]:
-    """Build DeepSpeed precision flags for ZeRO-2 measurement."""
+    """Build DeepSpeed precision flags for ZeRO measurement."""
 
     if config.weight_dtype == "bf16":
         return {"bf16": {"enabled": True}, "fp16": {"enabled": False}}
     if config.weight_dtype == "fp16":
         return {"bf16": {"enabled": False}, "fp16": {"enabled": True}}
-    raise AssertionError("ZeRO-2 measurement currently supports bf16 and fp16 only.")
+    raise AssertionError("ZeRO measurement currently supports bf16 and fp16 only.")
 
 
 def _zero2_config_dict(*, config: TrainingConfig) -> dict[str, Any]:
-    """Build the DeepSpeed ZeRO-2 config used for measurement."""
+    """Build the DeepSpeed ZeRO stage 2/3 config used for measurement."""
 
     deep_speed_config: dict[str, Any] = {
         "train_micro_batch_size_per_gpu": config.micro_batch_size_per_gpu,
@@ -46,21 +47,26 @@ def _zero2_config_dict(*, config: TrainingConfig) -> dict[str, Any]:
             * config.world_size()
         ),
         "zero_optimization": {
-            "stage": 2,
-            "allgather_partitions": True,
-            "reduce_scatter": True,
-            "overlap_comm": True,
-            "contiguous_gradients": True,
+            "stage": config.resolved_zero_stage(),
+            "allgather_partitions": config.zero_allgather_partitions,
+            "reduce_scatter": config.zero_reduce_scatter,
+            "overlap_comm": config.zero_overlap_comm,
+            "contiguous_gradients": config.zero_contiguous_gradients,
+            "reduce_bucket_size": config.zero_bucket_elements,
+            "allgather_bucket_size": config.zero_bucket_elements,
+            "prefetch_bucket_size": config.zero_prefetch_elements,
+            "sub_group_size": config.zero_bucket_elements,
         },
-        "steps_per_print": 10**9,
-        "wall_clock_breakdown": False,
+        "zero_allow_untested_optimizer": config.zero_allow_untested_optimizer,
+        "steps_per_print": config.zero_steps_per_print,
+        "wall_clock_breakdown": config.zero_wall_clock_breakdown,
     }
     deep_speed_config.update(_zero2_precision_config(config=config))
     return deep_speed_config
 
 
 def _maybe_zero2_barrier() -> None:
-    """Synchronize ZeRO-2 workers when a process group is initialized."""
+    """Synchronize ZeRO workers when a process group is initialized."""
 
     if dist.is_initialized():
         dist.barrier(device_ids=[torch.cuda.current_device()])
@@ -72,20 +78,39 @@ def _initialize_zero2_engine(
     config: TrainingConfig,
     device_index: int,
 ) -> tuple[Any, ModelSpec, torch.device]:
-    """Initialize a DeepSpeed engine for ZeRO-2 measurement."""
+    """Initialize a DeepSpeed engine for ZeRO stage 2/3 measurement."""
 
     deepspeed = maybe_get_deepspeed()
-    model_spec = inspect_model(model_ref=model) if isinstance(model, str) else model
+    model_spec = (
+        inspect_model(
+            model_ref=model,
+            trust_remote_code=config.trust_remote_code,
+            supported_model_types=config.supported_model_types,
+            default_attention_type=config.default_attention_type,
+            intermediate_size_fallback_multiplier=(
+                config.intermediate_size_fallback_multiplier
+            ),
+        )
+        if isinstance(model, str)
+        else model
+    )
     device = torch.device("cuda", device_index)
     torch.cuda.set_device(device=device)
     model_ref = model if isinstance(model, str) else model.model_name
-    model_instance = _load_model(model_ref=model_ref, config=config, device=device)
+    model_instance = _load_model(
+        model_ref=model_ref,
+        model_spec=model_spec,
+        config=config,
+        device=device,
+    )
     if config.gradient_checkpointing:
         gradient_checkpointable_model = cast(Any, model_instance)
         gradient_checkpointable_model.gradient_checkpointing_enable()
-    optimizer = _build_optimizer(model=model_instance)
+    optimizer = _build_optimizer(model=model_instance, config=config)
     trainable_parameters = [
-        parameter for parameter in model_instance.parameters() if parameter.requires_grad
+        parameter
+        for parameter in model_instance.parameters()
+        if parameter.requires_grad
     ]
     engine, _, _, _ = deepspeed.initialize(
         model=model_instance,
@@ -107,7 +132,9 @@ def _run_zero2_warmup_steps(
     """Run warmup steps through the DeepSpeed engine."""
 
     for _ in range(config.warmup_steps):
-        batch = _make_synthetic_batch(model_spec=model_spec, config=config, device=device)
+        batch = _make_synthetic_batch(
+            model_spec=model_spec, config=config, device=device
+        )
         outputs = engine(**batch)
         engine.backward(outputs.loss)
         engine.step()
@@ -120,7 +147,7 @@ def _capture_zero2_measurement_phases(
     config: TrainingConfig,
     device: torch.device,
 ) -> tuple[list[PhaseMemoryRecord], dict[str, int], dict[str, int]]:
-    """Run one measured ZeRO-2 microstep and capture phase records."""
+    """Run one measured ZeRO microstep and capture phase records."""
 
     phase_records: list[PhaseMemoryRecord] = []
     previous_allocated = 0
@@ -154,12 +181,14 @@ def _capture_zero2_measurement_phases(
     state_snapshots["baseline_reserved_bytes"] = phase_records[-1].reserved_bytes
     batch = _make_synthetic_batch(model_spec=model_spec, config=config, device=device)
     capture_phase("batch_materialization", "measured")
-    with _activation_tracker(model=engine.module) as activations:
+    with _activation_tracker(model=engine.module, config=config) as activations:
         outputs = engine(**batch)
         capture_phase("forward", "measured", "activation_summary")
         capture_phase("loss_materialization", "measured")
         engine.backward(outputs.loss)
-        state_snapshots["gradient_bytes_after_backward"] = _gradient_bytes(model=engine.module)
+        state_snapshots["gradient_bytes_after_backward"] = _gradient_bytes(
+            model=engine.module
+        )
         capture_phase("backward", "measured")
     engine.step()
     state_snapshots["gradient_bytes_after_step"] = _gradient_bytes(model=engine.module)
@@ -179,7 +208,7 @@ def measure_zero2_local_peak_memory(
     config: TrainingConfig,
     device_index: int,
 ) -> MemoryResult:
-    """Measure one ZeRO-2 rank on its assigned CUDA device."""
+    """Measure one ZeRO rank on its assigned CUDA device."""
 
     engine, model_spec, device = _initialize_zero2_engine(
         model=model,
@@ -214,4 +243,9 @@ def measure_zero2_local_peak_memory(
         breakdown=breakdown,
         activation_metadata=activation_metadata,
         state_snapshots=state_snapshots,
+        extra_metadata={
+            "runtime_attention_implementation": _runtime_attention_implementation(
+                model=engine.module,
+            )
+        },
     )

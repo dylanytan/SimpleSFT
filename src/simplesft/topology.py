@@ -113,7 +113,9 @@ def is_cross_numa_topology(*, topology_text: str) -> bool:
     return False
 
 
-def maybe_apply_cross_numa_nccl_env(*, env: MutableMapping[str, str]) -> tuple[bool, str]:
+def maybe_apply_cross_numa_nccl_env(
+    *, env: MutableMapping[str, str]
+) -> tuple[bool, str]:
     """Apply NCCL env overrides when the host matches the known bad topology.
 
     Args:

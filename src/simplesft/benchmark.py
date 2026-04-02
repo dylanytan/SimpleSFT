@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from .artifacts import (
     save_benchmark_suite_result,
@@ -19,8 +19,8 @@ from .types import (
     BenchmarkSuiteResult,
     ComparisonResult,
     LoRAConfig,
+    MeasurementConfig,
     ModelSpec,
-    TrainingConfig,
 )
 
 
@@ -32,46 +32,100 @@ def build_default_benchmark_cases(
     tuning_modes: Iterable[str],
     distributed_modes: Iterable[str],
     attention_backends: Iterable[str] = ("standard",),
+    optimizer_names: Iterable[str] = ("adamw",),
     gpu_memory_gb: float = 24.0,
     gpus_per_node: int = 1,
     lora_rank: int = 16,
+    lora_alpha: float = 32.0,
+    lora_dropout: float = 0.0,
+    lora_target_modules: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj"),
+    lora_bias: str = "none",
     gradient_checkpointing: bool = False,
+    config_overrides: dict[str, Any] | None = None,
+    optimizer_overrides_by_name: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[BenchmarkCase, ...]:
-    """Build a default benchmark corpus from cartesian-product settings."""
+    """Build a default benchmark corpus from cartesian-product settings.
+
+    Args:
+        model: Model reference or inspected model spec.
+        seq_lens: Sequence lengths to sweep.
+        micro_batches: Micro-batch sizes per GPU.
+        tuning_modes: Fine-tuning modes to evaluate.
+        distributed_modes: Distributed backends to evaluate.
+        attention_backends: Attention backends to evaluate.
+        optimizer_names: Optimizer names to evaluate.
+        gpu_memory_gb: Per-GPU memory budget.
+        gpus_per_node: GPUs visible to each benchmark run.
+        lora_rank: LoRA rank for LoRA cases.
+        lora_alpha: LoRA alpha for LoRA cases.
+        lora_dropout: LoRA dropout for LoRA cases.
+        lora_target_modules: Targeted LoRA module suffixes.
+        lora_bias: LoRA bias mode.
+        gradient_checkpointing: Whether checkpointing is enabled.
+        config_overrides: Shared config overrides for all generated cases.
+        optimizer_overrides_by_name: Per-optimizer config overrides.
+
+    Returns:
+        Tuple of benchmark cases.
+    """
 
     cases: list[BenchmarkCase] = []
     for tuning_mode in tuning_modes:
         for distributed_mode in distributed_modes:
             for attention_backend in attention_backends:
-                for seq_len in seq_lens:
-                    for micro_batch_size in micro_batches:
-                        lora = None
-                        if tuning_mode == "lora":
-                            lora = LoRAConfig(rank=lora_rank)
-                        config = TrainingConfig(
-                            tuning_mode=tuning_mode,
-                            micro_batch_size_per_gpu=micro_batch_size,
-                            max_seq_len=seq_len,
-                            gradient_checkpointing=gradient_checkpointing,
-                            distributed_mode=distributed_mode,
-                            attention_backend=attention_backend,
-                            gpu_memory_gb=gpu_memory_gb,
-                            gpus_per_node=gpus_per_node,
-                            lora=lora,
-                        )
-                        checkpoint_tag = "-ckpt" if gradient_checkpointing else ""
-                        case_name = (
-                            f"{tuning_mode}-{distributed_mode}-{attention_backend}"
-                            f"{checkpoint_tag}-seq{seq_len}-mb{micro_batch_size}"
-                        )
-                        cases.append(
-                            BenchmarkCase(
-                                name=case_name,
-                                model=model,
-                                config=config,
-                                tags=(tuning_mode, distributed_mode, attention_backend),
+                for optimizer_name in optimizer_names:
+                    for seq_len in seq_lens:
+                        for micro_batch_size in micro_batches:
+                            lora = None
+                            if tuning_mode == "lora":
+                                lora = LoRAConfig(
+                                    rank=lora_rank,
+                                    alpha=lora_alpha,
+                                    dropout=lora_dropout,
+                                    target_modules=lora_target_modules,
+                                    bias=lora_bias,
+                                )
+                            config_kwargs: dict[str, Any] = dict(
+                                tuning_mode=tuning_mode,
+                                optimizer_name=optimizer_name,
+                                micro_batch_size_per_gpu=micro_batch_size,
+                                max_seq_len=seq_len,
+                                gradient_checkpointing=gradient_checkpointing,
+                                distributed_mode=distributed_mode,
+                                attention_backend=attention_backend,
+                                gpu_memory_gb=gpu_memory_gb,
+                                gpus_per_node=gpus_per_node,
+                                lora=lora,
                             )
-                        )
+                            if config_overrides is not None:
+                                config_kwargs.update(config_overrides)
+                            if optimizer_overrides_by_name is not None:
+                                config_kwargs.update(
+                                    optimizer_overrides_by_name.get(
+                                        optimizer_name,
+                                        {},
+                                    )
+                                )
+                            config = MeasurementConfig(**config_kwargs)
+                            checkpoint_tag = "-ckpt" if gradient_checkpointing else ""
+                            case_name = (
+                                f"{tuning_mode}-{distributed_mode}-{optimizer_name}"
+                                f"-{attention_backend}"
+                                f"{checkpoint_tag}-seq{seq_len}-mb{micro_batch_size}"
+                            )
+                            cases.append(
+                                BenchmarkCase(
+                                    name=case_name,
+                                    model=model,
+                                    config=config,
+                                    tags=(
+                                        tuning_mode,
+                                        distributed_mode,
+                                        optimizer_name,
+                                        attention_backend,
+                                    ),
+                                )
+                            )
     return tuple(cases)
 
 
@@ -84,7 +138,10 @@ def _case_dir(*, output_dir: str | Path, case: BenchmarkCase) -> Path:
 def _run_case_estimate(*, case: BenchmarkCase):
     """Run the estimate path for one benchmark case."""
 
-    return estimate_peak_memory(model=case.model, config=case.config)
+    return estimate_peak_memory(
+        model=case.model,
+        config=case.config.to_estimator_config(),
+    )
 
 
 def _run_case_measure(*, case: BenchmarkCase):
@@ -108,7 +165,10 @@ def _save_case_artifacts(
     save_memory_result(result=estimate, path=estimate_path)
     try:
         if not include_measurement:
-            return BenchmarkCaseResult(case=case, estimate_path=str(estimate_path)), None
+            return (
+                BenchmarkCaseResult(case=case, estimate_path=str(estimate_path)),
+                None,
+            )
         measurement = _run_case_measure(case=case)
         measurement_path = case_output_dir / "measurement.json"
         save_memory_result(result=measurement, path=measurement_path)
@@ -164,7 +224,9 @@ def run_benchmark_suite(
     suite_result = BenchmarkSuiteResult(
         output_dir=str(output_dir),
         case_results=tuple(case_results),
-        notes=("Measurement failures are allowed by default during estimate-first iteration.",),
+        notes=(
+            "Measurement failures are allowed by default during estimate-first iteration.",
+        ),
     )
     save_benchmark_suite_result(
         result=suite_result,

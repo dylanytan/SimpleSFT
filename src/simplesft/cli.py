@@ -16,13 +16,15 @@ from .artifacts import (
 )
 from .benchmark import build_default_benchmark_cases, run_benchmark_suite
 from .compare import compare_measurement_to_estimate
+from .corpus_cleaning import clean_measurement_corpus
 from .estimate import estimate_peak_memory
 from .inspect import inspect_model
 from .measure import measure_peak_memory
 from .rebuild import rebuild_benchmark_suite_from_measurements
 from .reporting import render_comparison_report, render_suite_report
 from .search import search_configurations
-from .types import LoRAConfig, TrainingConfig
+from .types import EstimatorConfig, LoRAConfig, MeasurementConfig
+from .web_server import serve_web_interface
 
 
 def _print_json(*, payload: dict) -> None:
@@ -31,14 +33,41 @@ def _print_json(*, payload: dict) -> None:
     print(json.dumps(payload, indent=2))
 
 
-def _build_training_config(args: argparse.Namespace) -> TrainingConfig:
-    """Construct a `TrainingConfig` from CLI args."""
+def _build_measurement_config(args: argparse.Namespace) -> MeasurementConfig:
+    """Construct a `MeasurementConfig` from CLI args."""
 
     lora_config = None
     if args.tuning_mode == "lora":
         lora_config = LoRAConfig(rank=args.lora_rank)
-    return TrainingConfig(
+    return MeasurementConfig(
         tuning_mode=args.tuning_mode,
+        optimizer_name=args.optimizer_name,
+        optimizer_learning_rate=args.optimizer_learning_rate,
+        optimizer_beta1=args.optimizer_beta1,
+        optimizer_beta2=args.optimizer_beta2,
+        optimizer_momentum=args.optimizer_momentum,
+        optimizer_alpha=args.optimizer_alpha,
+        optimizer_centered=args.optimizer_centered,
+        micro_batch_size_per_gpu=args.micro_batch_size_per_gpu,
+        max_seq_len=args.max_seq_len,
+        gradient_checkpointing=args.gradient_checkpointing,
+        attention_backend=args.attention_backend,
+        distributed_mode=args.distributed_mode,
+        gpus_per_node=args.gpus_per_node,
+        gpu_memory_gb=args.gpu_memory_gb,
+        lora=lora_config,
+    )
+
+
+def _build_estimator_config(args: argparse.Namespace) -> EstimatorConfig:
+    """Construct an `EstimatorConfig` from CLI args."""
+
+    lora_config = None
+    if args.tuning_mode == "lora":
+        lora_config = LoRAConfig(rank=args.lora_rank)
+    return EstimatorConfig(
+        tuning_mode=args.tuning_mode,
+        optimizer_name=args.optimizer_name,
         micro_batch_size_per_gpu=args.micro_batch_size_per_gpu,
         max_seq_len=args.max_seq_len,
         gradient_checkpointing=args.gradient_checkpointing,
@@ -54,6 +83,13 @@ def _add_common_training_args(parser: argparse.ArgumentParser) -> None:
     """Register training config args on a parser."""
 
     parser.add_argument("--tuning-mode", default="full_ft", choices=["full_ft", "lora"])
+    parser.add_argument("--optimizer-name", default="adamw")
+    parser.add_argument("--optimizer-learning-rate", type=float, default=1e-4)
+    parser.add_argument("--optimizer-beta1", type=float, default=0.9)
+    parser.add_argument("--optimizer-beta2", type=float, default=0.999)
+    parser.add_argument("--optimizer-momentum", type=float, default=0.0)
+    parser.add_argument("--optimizer-alpha", type=float, default=0.99)
+    parser.add_argument("--optimizer-centered", action="store_true")
     parser.add_argument("--micro-batch-size-per-gpu", type=int, default=1)
     parser.add_argument("--max-seq-len", type=int, default=512)
     parser.add_argument("--gradient-checkpointing", action="store_true")
@@ -61,7 +97,7 @@ def _add_common_training_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--distributed-mode",
         default="single_gpu",
-        choices=["single_gpu", "ddp", "zero2"],
+        choices=["single_gpu", "ddp", "zero2", "zero3"],
     )
     parser.add_argument("--gpus-per-node", type=int, default=1)
     parser.add_argument("--gpu-memory-gb", type=float, default=24.0)
@@ -88,7 +124,9 @@ def _handle_inspect(args: argparse.Namespace) -> None:
 def _handle_estimate(args: argparse.Namespace) -> None:
     """Handle the `estimate` subcommand."""
 
-    result = estimate_peak_memory(model=args.model, config=_build_training_config(args=args))
+    result = estimate_peak_memory(
+        model=args.model, config=_build_estimator_config(args=args)
+    )
     if args.output:
         save_memory_result(result=result, path=args.output)
     _print_json(payload=asdict(result))
@@ -97,7 +135,9 @@ def _handle_estimate(args: argparse.Namespace) -> None:
 def _handle_measure(args: argparse.Namespace) -> None:
     """Handle the `measure` subcommand."""
 
-    result = measure_peak_memory(model=args.model, config=_build_training_config(args=args))
+    result = measure_peak_memory(
+        model=args.model, config=_build_measurement_config(args=args)
+    )
     if args.output:
         save_memory_result(result=result, path=args.output)
     _print_json(payload=asdict(result))
@@ -106,9 +146,12 @@ def _handle_measure(args: argparse.Namespace) -> None:
 def _handle_compare(args: argparse.Namespace) -> None:
     """Handle the `compare` subcommand."""
 
-    config = _build_training_config(args=args)
-    estimated = estimate_peak_memory(model=args.model, config=config)
-    measured = measure_peak_memory(model=args.model, config=config)
+    measurement_config = _build_measurement_config(args=args)
+    estimated = estimate_peak_memory(
+        model=args.model,
+        config=measurement_config.to_estimator_config(),
+    )
+    measured = measure_peak_memory(model=args.model, config=measurement_config)
     result = compare_measurement_to_estimate(measured=measured, estimated=estimated)
     if args.output:
         save_comparison_result(result=result, path=args.output)
@@ -122,8 +165,9 @@ def _handle_search(args: argparse.Namespace) -> None:
     if args.tuning_mode == "lora":
         lora_config = LoRAConfig(rank=args.lora_rank)
     configs = [
-        TrainingConfig(
+        EstimatorConfig(
             tuning_mode=args.tuning_mode,
+            optimizer_name=args.optimizer_name,
             micro_batch_size_per_gpu=micro_batch_size,
             max_seq_len=seq_len,
             distributed_mode=distributed_mode,
@@ -142,6 +186,14 @@ def _handle_search(args: argparse.Namespace) -> None:
 def _handle_benchmark(args: argparse.Namespace) -> None:
     """Handle the `benchmark` subcommand."""
 
+    config_overrides = {
+        "optimizer_learning_rate": args.optimizer_learning_rate,
+        "optimizer_beta1": args.optimizer_beta1,
+        "optimizer_beta2": args.optimizer_beta2,
+        "optimizer_momentum": args.optimizer_momentum,
+        "optimizer_alpha": args.optimizer_alpha,
+        "optimizer_centered": args.optimizer_centered,
+    }
     cases = build_default_benchmark_cases(
         model=args.model,
         seq_lens=args.seq_lens,
@@ -149,10 +201,12 @@ def _handle_benchmark(args: argparse.Namespace) -> None:
         tuning_modes=args.tuning_modes,
         distributed_modes=args.distributed_modes,
         attention_backends=args.attention_backends,
+        optimizer_names=args.optimizer_names,
         gpu_memory_gb=args.gpu_memory_gb,
         gpus_per_node=args.gpus_per_node,
         lora_rank=args.lora_rank,
         gradient_checkpointing=args.gradient_checkpointing,
+        config_overrides=config_overrides,
     )
     suite_result, comparisons = run_benchmark_suite(
         cases=cases,
@@ -209,6 +263,26 @@ def _handle_rebuild_benchmark(args: argparse.Namespace) -> None:
     _print_json(payload=asdict(suite_result))
 
 
+def _handle_clean_corpus(args: argparse.Namespace) -> None:
+    """Handle the `clean-corpus` subcommand."""
+
+    result = clean_measurement_corpus(
+        root_dir=args.root_dir,
+        output_dir=args.output_dir,
+    )
+    _print_json(payload=asdict(result))
+
+
+def _handle_web(args: argparse.Namespace) -> None:
+    """Handle the `web` subcommand."""
+
+    serve_web_interface(
+        host=args.host,
+        port=args.port,
+        open_browser=not args.no_browser,
+    )
+
+
 def main() -> None:
     """Run the SimpleSFT command-line interface."""
 
@@ -237,9 +311,12 @@ def main() -> None:
     search_parser.add_argument(
         "--distributed-modes",
         nargs="+",
-        default=["single_gpu", "ddp", "zero2"],
+        default=["single_gpu", "ddp", "zero2", "zero3"],
     )
-    search_parser.add_argument("--tuning-mode", default="full_ft", choices=["full_ft", "lora"])
+    search_parser.add_argument(
+        "--tuning-mode", default="full_ft", choices=["full_ft", "lora"]
+    )
+    search_parser.add_argument("--optimizer-name", default="adamw")
     search_parser.add_argument("--gpu-memory-gb", type=float, default=24.0)
     search_parser.add_argument("--gpus-per-node", type=int, default=1)
     search_parser.add_argument("--lora-rank", type=int, default=16)
@@ -249,13 +326,24 @@ def main() -> None:
     benchmark_parser.add_argument("--output-dir", required=True)
     benchmark_parser.add_argument("--seq-lens", nargs="+", type=int, required=True)
     benchmark_parser.add_argument("--micro-batches", nargs="+", type=int, required=True)
-    benchmark_parser.add_argument("--tuning-modes", nargs="+", default=["full_ft", "lora"])
+    benchmark_parser.add_argument(
+        "--tuning-modes", nargs="+", default=["full_ft", "lora"]
+    )
     benchmark_parser.add_argument(
         "--distributed-modes",
         nargs="+",
-        default=["single_gpu", "ddp", "zero2"],
+        default=["single_gpu", "ddp", "zero2", "zero3"],
     )
-    benchmark_parser.add_argument("--attention-backends", nargs="+", default=["standard"])
+    benchmark_parser.add_argument(
+        "--attention-backends", nargs="+", default=["standard"]
+    )
+    benchmark_parser.add_argument("--optimizer-names", nargs="+", default=["adamw"])
+    benchmark_parser.add_argument("--optimizer-learning-rate", type=float, default=1e-4)
+    benchmark_parser.add_argument("--optimizer-beta1", type=float, default=0.9)
+    benchmark_parser.add_argument("--optimizer-beta2", type=float, default=0.999)
+    benchmark_parser.add_argument("--optimizer-momentum", type=float, default=0.0)
+    benchmark_parser.add_argument("--optimizer-alpha", type=float, default=0.99)
+    benchmark_parser.add_argument("--optimizer-centered", action="store_true")
     benchmark_parser.add_argument("--gpu-memory-gb", type=float, default=24.0)
     benchmark_parser.add_argument("--gpus-per-node", type=int, default=1)
     benchmark_parser.add_argument("--lora-rank", type=int, default=16)
@@ -275,6 +363,15 @@ def main() -> None:
     rebuild_parser.add_argument("--iteration-name", default="Rebuilt Benchmark Suite")
     rebuild_parser.add_argument("--report-path")
 
+    clean_parser = subparsers.add_parser("clean-corpus")
+    clean_parser.add_argument("--root-dir", required=True)
+    clean_parser.add_argument("--output-dir", required=True)
+
+    web_parser = subparsers.add_parser("web")
+    web_parser.add_argument("--host", default="127.0.0.1")
+    web_parser.add_argument("--port", type=int, default=8765)
+    web_parser.add_argument("--no-browser", action="store_true")
+
     args = parser.parse_args()
     handlers = {
         "inspect": _handle_inspect,
@@ -285,6 +382,8 @@ def main() -> None:
         "benchmark": _handle_benchmark,
         "report": _handle_report,
         "rebuild-benchmark": _handle_rebuild_benchmark,
+        "clean-corpus": _handle_clean_corpus,
+        "web": _handle_web,
     }
     handlers[args.command](args)
 

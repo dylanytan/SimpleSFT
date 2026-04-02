@@ -2,7 +2,11 @@
 
 from pathlib import Path
 
-from simplesft.artifacts import load_memory_result, save_benchmark_suite_result, save_memory_result
+from simplesft.artifacts import (
+    load_memory_result,
+    save_benchmark_suite_result,
+    save_memory_result,
+)
 from simplesft.rebuild import rebuild_benchmark_suite_from_measurements
 from simplesft.types import (
     BenchmarkCase,
@@ -73,7 +77,9 @@ def test_rebuild_benchmark_suite_from_measurements(
             case_results=(
                 BenchmarkCaseResult(
                     case=case,
-                    estimate_path=str(source_dir / case.artifact_slug() / "estimate.json"),
+                    estimate_path=str(
+                        source_dir / case.artifact_slug() / "estimate.json"
+                    ),
                     measurement_path=str(measurement_path),
                 ),
             ),

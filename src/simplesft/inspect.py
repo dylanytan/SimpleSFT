@@ -1,4 +1,4 @@
-"""Model inspection helpers for supported Hugging Face decoder-only models."""
+"""Model inspection helpers for supported Hugging Face language models."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ from typing import Any, Iterable, cast
 
 import torch
 
-from .constants import SUPPORTED_MODEL_TYPES
-from .runtime import build_empty_causal_lm, load_auto_config
-from .types import ModelLinearLayerSpec, ModelSpec
+from .constants import SUPPORTED_MODEL_TYPES, model_type_is_supported
+from .runtime import build_empty_model, load_auto_config
+from .types import ModelLinearLayerSpec, ModelParameterSpec, ModelSpec, VisionSpec
 
 
 def _classify_module(module_name: str) -> str:
@@ -25,7 +25,18 @@ def _classify_module(module_name: str) -> str:
         return "mlp"
     if any(
         token in lower_name
-        for token in ("q_proj", "k_proj", "v_proj", "o_proj", "c_attn")
+        for token in (
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "c_attn",
+            "qkv",
+            "wq",
+            "wk",
+            "wv",
+            "wo",
+        )
     ):
         return "attention"
     if any(
@@ -34,6 +45,17 @@ def _classify_module(module_name: str) -> str:
     ):
         return "mlp"
     return "other"
+
+
+def _classify_parameter(parameter_name: str) -> str:
+    """Return a coarse parameter category for optimizer-state accounting."""
+
+    lower_name = parameter_name.lower()
+    if any(token in lower_name for token in ("embed", "wte", "lm_head")):
+        return "embedding"
+    if any(token in lower_name for token in ("norm", "ln_", "layernorm")):
+        return "norm"
+    return _classify_module(module_name=parameter_name)
 
 
 def _build_linear_like_spec(
@@ -63,6 +85,29 @@ def _build_linear_like_spec(
     return None
 
 
+def _vision_spec_from_config(*, config: Any) -> VisionSpec | None:
+    """Build a `VisionSpec` when a config exposes a Qwen-style image path."""
+
+    vision_config = getattr(config, "vision_config", None)
+    if vision_config is None:
+        return None
+    patch_size = getattr(vision_config, "patch_size", None)
+    if patch_size is None:
+        patch_size = getattr(vision_config, "spatial_patch_size", 0)
+    spatial_merge_size = getattr(vision_config, "spatial_merge_size", 1)
+    temporal_patch_size = getattr(vision_config, "temporal_patch_size", 1)
+    default_image_size = getattr(vision_config, "image_size", 448)
+    return VisionSpec(
+        default_image_size=int(default_image_size),
+        patch_size=int(patch_size),
+        temporal_patch_size=int(temporal_patch_size),
+        spatial_merge_size=int(spatial_merge_size),
+        image_token_id=getattr(config, "image_token_id", None),
+        vision_start_token_id=getattr(config, "vision_start_token_id", None),
+        vision_end_token_id=getattr(config, "vision_end_token_id", None),
+    )
+
+
 def _iter_linear_layers(model: torch.nn.Module) -> Iterable[ModelLinearLayerSpec]:
     """Yield linear-layer summaries from a torch model."""
 
@@ -70,6 +115,17 @@ def _iter_linear_layers(model: torch.nn.Module) -> Iterable[ModelLinearLayerSpec
         layer_spec = _build_linear_like_spec(module_name=module_name, module=module)
         if layer_spec is not None:
             yield layer_spec
+
+
+def _iter_parameter_specs(model: torch.nn.Module) -> Iterable[ModelParameterSpec]:
+    """Yield named parameter summaries from a torch model."""
+
+    for parameter_name, parameter in model.named_parameters():
+        yield ModelParameterSpec(
+            parameter_name=parameter_name,
+            shape=tuple(int(dim_size) for dim_size in parameter.shape),
+            category=_classify_parameter(parameter_name=parameter_name),
+        )
 
 
 def _get_config_value(config: Any, *names: str) -> int:
@@ -82,7 +138,7 @@ def _get_config_value(config: Any, *names: str) -> int:
     raise AssertionError(f"Config is missing required attributes: {names}")
 
 
-def _get_intermediate_size(config: Any) -> int:
+def _get_intermediate_size(*, config: Any, fallback_multiplier: int) -> int:
     """Return the MLP intermediate size with architecture-aware fallbacks."""
 
     value = getattr(config, "intermediate_size", None)
@@ -92,19 +148,26 @@ def _get_intermediate_size(config: Any) -> int:
     if value is not None:
         return int(value)
     hidden_size = _get_config_value(config, "hidden_size", "n_embd")
-    return 4 * hidden_size
+    return fallback_multiplier * hidden_size
 
 
 def inspect_model(
     model_ref: str,
     *,
     trust_remote_code: bool = False,
+    supported_model_types: tuple[str, ...] = tuple(sorted(SUPPORTED_MODEL_TYPES)),
+    default_attention_type: str = "causal",
+    intermediate_size_fallback_multiplier: int = 4,
 ) -> ModelSpec:
-    """Inspect a Hugging Face causal LM and return a compact model summary.
+    """Inspect a supported Hugging Face LM and return a compact model summary.
 
     Args:
         model_ref: Hugging Face model id or local model path.
         trust_remote_code: Whether to allow custom remote model code.
+        supported_model_types: Allowed Hugging Face model-type strings.
+        default_attention_type: Fallback attention-type label.
+        intermediate_size_fallback_multiplier: Multiplier used when the config
+            does not expose an intermediate size.
 
     Returns:
         ModelSpec describing the model structure.
@@ -119,10 +182,14 @@ def inspect_model(
         model_ref=model_ref,
         trust_remote_code=trust_remote_code,
     )
-    assert (
-        config.model_type in SUPPORTED_MODEL_TYPES
-    ), f"Unsupported model_type `{config.model_type}`. Only dense decoder-only models are supported."
-    model = build_empty_causal_lm(
+    assert model_type_is_supported(
+        model_type=config.model_type,
+        supported_model_types=supported_model_types,
+    ), (
+        f"Unsupported model_type `{config.model_type}`. Only supported Qwen, OLMo, "
+        "and baseline dense language-model families are allowed."
+    )
+    model = build_empty_model(
         config=config,
         trust_remote_code=trust_remote_code,
     )
@@ -138,10 +205,15 @@ def inspect_model(
             "num_attention_heads",
             "n_head",
         ),
-        intermediate_size=_get_intermediate_size(config),
+        intermediate_size=_get_intermediate_size(
+            config=config,
+            fallback_multiplier=intermediate_size_fallback_multiplier,
+        ),
         vocab_size=_get_config_value(config, "vocab_size"),
         max_position_embeddings=getattr(config, "max_position_embeddings", 0),
         total_params=total_params,
         trainable_linear_layers=linear_layers,
-        attention_type="causal",
+        parameter_specs=tuple(_iter_parameter_specs(model=model)),
+        attention_type=default_attention_type,
+        vision=_vision_spec_from_config(config=config),
     )

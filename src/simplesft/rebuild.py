@@ -13,7 +13,24 @@ from .artifacts import (
 )
 from .compare import compare_measurement_to_estimate
 from .estimate import estimate_peak_memory
-from .types import BenchmarkCase, BenchmarkCaseResult, BenchmarkSuiteResult, ComparisonResult
+from .types import (
+    BenchmarkCase,
+    BenchmarkCaseResult,
+    BenchmarkSuiteResult,
+    ComparisonResult,
+    EstimatorConfig,
+    MeasurementConfig,
+)
+
+
+def _measurement_to_estimator_config(
+    *, config: EstimatorConfig | MeasurementConfig
+) -> EstimatorConfig:
+    """Return the structural estimator config for a saved measurement config."""
+
+    if isinstance(config, EstimatorConfig):
+        return config
+    return config.to_estimator_config()
 
 
 def _case_output_dir(*, output_dir: str | Path, case: BenchmarkCase) -> Path:
@@ -25,9 +42,9 @@ def _case_output_dir(*, output_dir: str | Path, case: BenchmarkCase) -> Path:
 def _measurement_path_from_case_result(case_result: BenchmarkCaseResult) -> Path:
     """Return the saved measurement path for one benchmark case result."""
 
-    assert case_result.measurement_path is not None, (
-        f"Measurement artifact missing for benchmark case {case_result.case.name}."
-    )
+    assert (
+        case_result.measurement_path is not None
+    ), f"Measurement artifact missing for benchmark case {case_result.case.name}."
     return Path(case_result.measurement_path)
 
 
@@ -38,10 +55,12 @@ def _rebuild_case_from_measurement(
 ) -> tuple[BenchmarkCaseResult, ComparisonResult]:
     """Rebuild estimate and comparison artifacts from a saved measurement."""
 
-    measurement = load_memory_result(path=_measurement_path_from_case_result(case_result))
+    measurement = load_memory_result(
+        path=_measurement_path_from_case_result(case_result)
+    )
     estimate = estimate_peak_memory(
         model=case_result.case.model,
-        config=measurement.config,
+        config=_measurement_to_estimator_config(config=measurement.config),
     )
     comparison = compare_measurement_to_estimate(
         measured=measurement,

@@ -37,9 +37,42 @@ def test_measure_peak_memory_requires_cuda(monkeypatch: pytest.MonkeyPatch) -> N
         )
 
 
-def test_measure_peak_memory_zero2_requires_optional_backend() -> None:
+def test_measure_peak_memory_rejects_tp_and_sp_runtime_requests() -> None:
+    """Measurement should fail clearly for unsupported TP/SP runtime shapes."""
+
+    with pytest.raises(RuntimeError, match="Measurement does not yet support"):
+        measure_peak_memory(
+            model=_toy_model_spec(),
+            config=TrainingConfig(
+                tuning_mode="full_ft",
+                distributed_mode="ddp",
+                gpus_per_node=2,
+                tensor_parallel_degree=2,
+            ),
+        )
+    with pytest.raises(RuntimeError, match="Measurement does not yet support"):
+        measure_peak_memory(
+            model=_toy_model_spec(),
+            config=TrainingConfig(
+                tuning_mode="full_ft",
+                distributed_mode="ddp",
+                gpus_per_node=2,
+                tensor_parallel_degree=2,
+                sequence_parallel=True,
+            ),
+        )
+
+
+def test_measure_peak_memory_zero2_requires_optional_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """ZeRO-2 measurement should fail clearly without its runtime stack."""
 
+    monkeypatch.setattr(
+        measure_module,
+        "maybe_get_deepspeed",
+        lambda: (_ for _ in ()).throw(RuntimeError("missing deepspeed")),
+    )
     with pytest.raises(RuntimeError):
         measure_peak_memory(
             model=_toy_model_spec(),
@@ -89,6 +122,54 @@ def test_measure_peak_memory_delegates_zero2_runs(
         config=TrainingConfig(
             tuning_mode="full_ft",
             distributed_mode="zero2",
+            gpus_per_node=2,
+        ),
+    )
+    assert result.global_peak_bytes == expected_result.global_peak_bytes
+
+
+def test_measure_peak_memory_delegates_zero3_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Top-level measurement should delegate multi-rank ZeRO-3 runs."""
+
+    expected_result = MemoryResult(
+        mode="measure",
+        model_name="toy",
+        config=TrainingConfig(
+            tuning_mode="full_ft",
+            distributed_mode="zero3",
+            gpus_per_node=2,
+            gpu_memory_gb=80.0,
+        ),
+        breakdown=MemoryComponentBreakdown(parameter_bytes=1),
+        phase_records=(
+            PhaseMemoryRecord(
+                phase_name="optimizer_step",
+                allocated_bytes=12,
+                reserved_bytes=12,
+                peak_allocated_bytes=12,
+                peak_reserved_bytes=12,
+                delta_allocated_bytes=12,
+                delta_reserved_bytes=12,
+            ),
+        ),
+        peak_phase="optimizer_step",
+        global_peak_bytes=12,
+        feasible=True,
+    )
+    monkeypatch.setattr(measure_module, "is_cuda_available", lambda: True)
+    monkeypatch.setattr(measure_module, "maybe_get_deepspeed", lambda: object())
+    monkeypatch.setattr(
+        zero2_measure_module,
+        "run_zero2_measurement",
+        lambda model, config: expected_result,
+    )
+    result = measure_peak_memory(
+        model="toy-model",
+        config=TrainingConfig(
+            tuning_mode="full_ft",
+            distributed_mode="zero3",
             gpus_per_node=2,
         ),
     )

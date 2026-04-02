@@ -1,4 +1,4 @@
-"""Helpers for launching and aggregating ZeRO-2 measurement runs."""
+"""Helpers for launching and aggregating ZeRO stage 2/3 measurement runs."""
 
 from __future__ import annotations
 
@@ -14,7 +14,11 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-from .artifacts import load_memory_result, load_memory_result_from_raw, save_memory_result
+from .artifacts import (
+    load_memory_result,
+    load_memory_result_from_raw,
+    save_memory_result,
+)
 from .distributed_common import (
     build_torchrun_env,
     load_request,
@@ -28,8 +32,10 @@ from .utils import maybe_get_deepspeed
 from .zero2_measure import measure_zero2_local_peak_memory
 
 
-def run_zero2_measurement(*, model: str | ModelSpec, config: TrainingConfig) -> MemoryResult:
-    """Launch a torchrun-based ZeRO-2 measurement and return the aggregated result."""
+def run_zero2_measurement(
+    *, model: str | ModelSpec, config: TrainingConfig
+) -> MemoryResult:
+    """Launch a torchrun-based ZeRO measurement and return the aggregated result."""
 
     maybe_get_deepspeed()
     with tempfile.TemporaryDirectory(prefix="simplesft-zero2-") as temp_dir:
@@ -37,7 +43,9 @@ def run_zero2_measurement(*, model: str | ModelSpec, config: TrainingConfig) -> 
         output_path = Path(temp_dir) / "result.json"
         launch_env, cross_numa_applied, cross_numa_reason = build_torchrun_env()
         request_path.write_text(
-            json.dumps({"model": serialize_model(model), "config": asdict(config)}, indent=2),
+            json.dumps(
+                {"model": serialize_model(model), "config": asdict(config)}, indent=2
+            ),
             encoding="utf-8",
         )
         subprocess.run(
@@ -58,7 +66,7 @@ def run_zero2_measurement(*, model: str | ModelSpec, config: TrainingConfig) -> 
 
 
 def _setup_zero2_runtime() -> int:
-    """Initialize the local ZeRO-2 worker runtime and return the local rank."""
+    """Initialize the local ZeRO worker runtime and return the local rank."""
 
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
@@ -68,7 +76,7 @@ def _setup_zero2_runtime() -> int:
 
 
 def _gather_results(*, local_result: MemoryResult) -> list[dict[str, Any]]:
-    """Gather serialized rank-local ZeRO-2 measurement results across all ranks."""
+    """Gather serialized rank-local ZeRO measurement results across all ranks."""
 
     gathered_results: list[dict[str, Any] | None] = [None] * dist.get_world_size()
     dist.all_gather_object(gathered_results, asdict(local_result))
@@ -76,9 +84,11 @@ def _gather_results(*, local_result: MemoryResult) -> list[dict[str, Any]]:
 
 
 def main() -> None:
-    """Run the torchrun worker entrypoint for ZeRO-2 measurement."""
+    """Run the torchrun worker entrypoint for ZeRO stage 2/3 measurement."""
 
-    parser = argparse.ArgumentParser(prog="python -m simplesft.distributed_zero2_measure")
+    parser = argparse.ArgumentParser(
+        prog="python -m simplesft.distributed_zero2_measure"
+    )
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -97,8 +107,10 @@ def main() -> None:
                 load_memory_result_from_raw(raw=raw_result)
                 for raw_result in gathered_results
             ],
-            aggregation_tag="zero2_aggregated",
-            aggregation_assumption="ZeRO-2 result aggregates the max across ranks.",
+            aggregation_tag=f"{config.distributed_mode}_aggregated",
+            aggregation_assumption=(
+                f"{config.distributed_mode} result aggregates the max across ranks."
+            ),
         )
         save_memory_result(result=aggregated_result, path=args.output)
     dist.barrier(device_ids=[torch.cuda.current_device()])

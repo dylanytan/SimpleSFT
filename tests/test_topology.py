@@ -30,7 +30,9 @@ def test_maybe_apply_cross_numa_nccl_env_sets_nccl_p2p_disable(monkeypatch) -> N
 def test_maybe_apply_cross_numa_nccl_env_skips_non_matching_shape(monkeypatch) -> None:
     """Non-2xA100 hosts should skip the cross-NUMA NCCL override."""
 
-    monkeypatch.setattr(topology_module, "read_gpu_product_names", lambda: ["NVIDIA L4"])
+    monkeypatch.setattr(
+        topology_module, "read_gpu_product_names", lambda: ["NVIDIA L4"]
+    )
     fake_env: dict[str, str] = {}
     applied, reason = topology_module.maybe_apply_cross_numa_nccl_env(env=fake_env)
     assert applied is False

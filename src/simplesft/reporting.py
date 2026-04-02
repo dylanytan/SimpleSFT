@@ -63,11 +63,16 @@ def render_comparison_report(
         comparisons=comparisons,
         field_name="workspace_proxy_relative_error",
     )
+    worst_intermediate_errors = _aggregate_max_relative_errors(
+        comparisons=comparisons,
+        field_name="intermediate_term_relative_error",
+    )
     lines = [f"# {iteration_name}", "", "## Benchmarks"]
     for comparison in comparisons:
         lines.append(
             f"- {comparison.model_name} / {comparison.measured.config.tuning_mode} / "
             f"{comparison.measured.config.distributed_mode} / "
+            f"{comparison.measured.config.optimizer_name} / "
             f"seq={comparison.measured.config.max_seq_len} / "
             f"mb={comparison.measured.config.micro_batch_size_per_gpu}"
         )
@@ -103,6 +108,10 @@ def render_comparison_report(
         lines.extend(["", "## Worst workspace-proxy relative errors"])
         for proxy_name, relative_error in worst_workspace_errors[:5]:
             lines.append(f"- {proxy_name}: {_format_percent(relative_error)}")
+    if worst_intermediate_errors:
+        lines.extend(["", "## Worst intermediate-term relative errors"])
+        for term_name, relative_error in worst_intermediate_errors[:5]:
+            lines.append(f"- {term_name}: {_format_percent(relative_error)}")
     lines.extend(
         [
             "",

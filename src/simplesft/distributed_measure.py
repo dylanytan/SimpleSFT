@@ -29,7 +29,9 @@ from .measure import _measure_local_peak_memory, aggregate_rank_results
 from .types import MemoryResult, ModelSpec, TrainingConfig
 
 
-def run_ddp_measurement(*, model: str | ModelSpec, config: TrainingConfig) -> MemoryResult:
+def run_ddp_measurement(
+    *, model: str | ModelSpec, config: TrainingConfig
+) -> MemoryResult:
     """Launch a torchrun-based DDP measurement and return the aggregated result.
 
     Args:
@@ -45,7 +47,9 @@ def run_ddp_measurement(*, model: str | ModelSpec, config: TrainingConfig) -> Me
         output_path = Path(temp_dir) / "result.json"
         launch_env, cross_numa_applied, cross_numa_reason = build_torchrun_env()
         request_path.write_text(
-            json.dumps({"model": serialize_model(model), "config": asdict(config)}, indent=2),
+            json.dumps(
+                {"model": serialize_model(model), "config": asdict(config)}, indent=2
+            ),
             encoding="utf-8",
         )
         subprocess.run(

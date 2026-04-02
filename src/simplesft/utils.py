@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import torch
@@ -54,22 +55,30 @@ def is_cuda_available() -> bool:
     return torch.cuda.is_available()
 
 
-def optimizer_state_in_baseline(*, warmup_steps: int, optimizer_name: str) -> bool:
+def optimizer_state_in_baseline(
+    *,
+    warmup_steps: int,
+    optimizer_state_in_baseline_after_warmup: bool,
+) -> bool:
     """Return whether optimizer state exists before the measured step.
 
     Args:
         warmup_steps: Number of warmup steps run before measurement.
-        optimizer_name: Configured optimizer name.
+        optimizer_state_in_baseline_after_warmup: Whether warmup should
+            materialize optimizer state before the measured step.
 
     Returns:
         Whether optimizer state is expected to be materialized at baseline.
 
     Example:
-        >>> optimizer_state_in_baseline(warmup_steps=1, optimizer_name="adamw")
+        >>> optimizer_state_in_baseline(
+        ...     warmup_steps=1,
+        ...     optimizer_state_in_baseline_after_warmup=True,
+        ... )
         True
     """
 
-    return warmup_steps > 0 and optimizer_name.lower() == "adamw"
+    return warmup_steps > 0 and optimizer_state_in_baseline_after_warmup
 
 
 def canonical_torch_dtype(dtype_name: str) -> torch.dtype:
@@ -118,6 +127,10 @@ def maybe_get_deepspeed() -> Any:
         Imported `deepspeed` module.
     """
 
+    if "TRITON_CACHE_DIR" not in os.environ:
+        triton_cache_dir = f"/tmp/{os.environ.get('USER', 'simplesft')}/triton-cache"
+        os.makedirs(triton_cache_dir, exist_ok=True)
+        os.environ["TRITON_CACHE_DIR"] = triton_cache_dir
     try:
         import deepspeed  # type: ignore
     except ImportError as exc:

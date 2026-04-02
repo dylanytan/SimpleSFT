@@ -7,3 +7,10 @@ __pycache__/
 *.egg-info/
 benchmark_artifacts/
 tmp-report-suite/
+slurm-*.out
+estimator_report/*.aux
+estimator_report/*.fdb_latexmk
+estimator_report/*.fls
+estimator_report/*.log
+estimator_report/*.out
+estimator_report/*.pdf

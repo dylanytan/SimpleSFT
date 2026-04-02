@@ -1,11 +1,13 @@
 # Qwen 2.5 ZeRO-2 Calibration Notes
 
-This document records the current 2-GPU ZeRO-2 calibration status for
-`Qwen/Qwen2.5-0.5B` and `Qwen/Qwen2.5-1.5B` on this host.
+This document records the current ZeRO-2 calibration status for
+`Qwen/Qwen2.5-0.5B`, `Qwen/Qwen2.5-1.5B`, and `Qwen/Qwen2.5-7B` on this host.
 
 ## Benchmark Corpus
 
-- GPUs: `2 x NVIDIA A100-PCIE-40GB`
+- GPUs:
+  - `2 x NVIDIA A100-PCIE-40GB` for the 0.5B and 1.5B corpora
+  - `3 x NVIDIA A100 80GB` for the 7B corpus
 - Topology: cross-NUMA; spawned jobs set `NCCL_P2P_DISABLE=1`
 - Weight dtype: `bf16`
 - Optimizer: `AdamW`
@@ -42,6 +44,30 @@ This document records the current 2-GPU ZeRO-2 calibration status for
   `benchmark_artifacts/qwen25_15b_zero2_ckpt_seq128_512_mb1_mb2_iter1`
 - `1.5B` ZeRO-2 checkpointing rebuilt suite, iteration 2:
   `benchmark_artifacts/qwen25_15b_zero2_ckpt_seq128_512_mb1_mb2_iter2`
+- `0.5B` rebuilt standard suite, iteration 4:
+  `benchmark_artifacts/qwen25_05b_zero2_seq128_512_mb1_mb2_iter4`
+- `1.5B` rebuilt standard suite, iteration 4:
+  `benchmark_artifacts/qwen25_15b_zero2_seq128_512_mb1_mb2_iter4`
+- `0.5B` rebuilt long-context suite, iteration 3:
+  `benchmark_artifacts/qwen25_05b_zero2_seq1024_2048_mb1_iter3`
+- `1.5B` rebuilt long-context suite, iteration 3:
+  `benchmark_artifacts/qwen25_15b_zero2_seq1024_2048_mb1_iter3`
+- `7B` measured suite, iteration 1:
+  `benchmark_artifacts/qwen25_7b_zero2_seq512_1024_mb1_iter1`
+- `7B` rebuilt calibrated suite, iteration 3:
+  `benchmark_artifacts/qwen25_7b_zero2_seq512_1024_mb1_iter3`
+- `0.5B` rebuilt flash suite, iteration 4:
+  `benchmark_artifacts/qwen25_05b_flash_zero2_seq128_512_mb1_mb2_iter4`
+- `1.5B` rebuilt flash suite, iteration 4:
+  `benchmark_artifacts/qwen25_15b_flash_zero2_seq128_512_mb1_mb2_iter4`
+- `0.5B` rebuilt flash long-context suite, iteration 4:
+  `benchmark_artifacts/qwen25_05b_flash_zero2_seq1024_2048_mb1_iter4`
+- `1.5B` rebuilt flash long-context suite, iteration 4:
+  `benchmark_artifacts/qwen25_15b_flash_zero2_seq1024_2048_mb1_iter4`
+- `0.5B` rebuilt checkpointed suite, iteration 3:
+  `benchmark_artifacts/qwen25_05b_zero2_ckpt_seq128_512_mb1_mb2_iter3`
+- `1.5B` rebuilt checkpointed suite, iteration 3:
+  `benchmark_artifacts/qwen25_15b_zero2_ckpt_seq128_512_mb1_mb2_iter3`
 
 ## Error Progression
 
@@ -51,12 +77,24 @@ This document records the current 2-GPU ZeRO-2 calibration status for
   - iteration 2 mean global peak error: `0.218 GiB`
   - iteration 2 median global relative error: `3.30%`
   - iteration 2 max global relative error: `7.86%`
+  - iteration 4 mean global peak error: `0.183 GiB`
+  - iteration 4 median global relative error: `1.17%`
+  - iteration 4 max global relative error: `6.08%`
 - `Qwen/Qwen2.5-1.5B`
   - iteration 1 mean global peak error: `6.243 GiB`
   - iteration 1 median global relative error: `27.39%`
   - iteration 2 mean global peak error: `0.241 GiB`
   - iteration 2 median global relative error: `1.50%`
   - iteration 2 max global relative error: `2.76%`
+  - iteration 4 mean global peak error: `0.117 GiB`
+  - iteration 4 median global relative error: `0.33%`
+  - iteration 4 max global relative error: `1.51%`
+- `Qwen/Qwen2.5-7B`
+  - iteration 1 mean global peak error: `23.407 GiB`
+  - iteration 1 median global relative error: `42.15%`
+  - iteration 3 mean global peak error: `0.232 GiB`
+  - iteration 3 median global relative error: `0.22%`
+  - iteration 3 max global relative error: `0.95%`
 
 ## Iteration 2 Results
 
@@ -139,6 +177,15 @@ This document records the current 2-GPU ZeRO-2 calibration status for
   placed at `backward`.
 - Comparison artifacts now include workspace-proxy errors so phase-local
   workspace pressure is visible during calibration.
+- LoRA ZeRO-2 reserve is now independent of activation bytes; it is modeled as a
+  runtime baseline term tied to model residency and world size.
+- LoRA ZeRO-2 backward workspace is now driven by effective microstep tokens
+  with an explicit long-context correction, rather than frozen-model scale.
+- LoRA ZeRO-2 forward workspace now uses full-model residency plus activation
+  pressure, instead of adapter-state scale.
+- FlashAttention no longer changes `activation_bytes` in the estimator because
+  the measurement path defines that component as retained tensors, not attention
+  kernel workspace.
 
 ## Key Findings
 
@@ -158,16 +205,120 @@ This document records the current 2-GPU ZeRO-2 calibration status for
 Measured flash suites were rebuilt against the current estimator:
 
 - `Qwen/Qwen2.5-0.5B`
-  - mean global peak error: `0.343 GiB`
-  - median global relative error: `3.68%`
-  - max global relative error: `13.24%`
+  - short-context rebuilt suite mean global peak error: `0.183 GiB`
+  - short-context rebuilt suite median global relative error: `1.17%`
+  - long-context rebuilt suite mean global peak error: `0.201 GiB`
+  - long-context rebuilt suite median global relative error: `1.57%`
 - `Qwen/Qwen2.5-1.5B`
-  - mean global peak error: `0.708 GiB`
-  - median global relative error: `4.53%`
-  - max global relative error: `12.21%`
+  - short-context rebuilt suite mean global peak error: `0.117 GiB`
+  - short-context rebuilt suite median global relative error: `0.33%`
+  - long-context rebuilt suite mean global peak error: `0.141 GiB`
+  - long-context rebuilt suite median global relative error: `0.85%`
 
 For this ZeRO-2 corpus, the measured global peak bytes were identical to the
 standard-attention ZeRO-2 suites in every matched case.
+
+## Iteration 5: Phase-Decomposed LoRA ZeRO-2
+
+This pass addressed a structural weakness in the LoRA ZeRO-2 estimator rather
+than only retuning constants.
+
+### What Changed
+
+- LoRA ZeRO-2 no longer uses one monolithic transient heuristic.
+- The estimator now separates LoRA ZeRO-2 peak pressure into:
+  - a baseline runtime reserve,
+  - a forward workspace term driven by microstep token pressure, retained
+    activation pressure, and persistent parameter residency,
+  - a backward workspace term driven by effective microstep tokens with an
+    explicit long-sequence correction.
+- The LoRA ZeRO-2 reserve no longer shrinks aggressively with world size. New
+  `3 x 80GB` LoRA measurements on the `0.5B` and `1.5B` models showed that the
+  previous world-size dependence was incorrect.
+
+### Additional Artifact Directories
+
+- `0.5B` rebuilt standard suite, iteration 5:
+  `benchmark_artifacts/qwen25_05b_zero2_seq128_512_mb1_mb2_iter4`
+- `1.5B` rebuilt standard suite, iteration 5:
+  `benchmark_artifacts/qwen25_15b_zero2_seq128_512_mb1_mb2_iter4`
+- `0.5B` rebuilt long-context suite, iteration 5:
+  `benchmark_artifacts/qwen25_05b_zero2_seq1024_2048_mb1_iter3`
+- `1.5B` rebuilt long-context suite, iteration 5:
+  `benchmark_artifacts/qwen25_15b_zero2_seq1024_2048_mb1_iter3`
+- `7B` rebuilt calibrated suite, iteration 5:
+  `benchmark_artifacts/qwen25_7b_zero2_seq512_1024_mb1_iter3`
+- `0.5B` world-size-disambiguation suite, measured on `3 x 80GB`:
+  `benchmark_artifacts/qwen25_05b_zero2_world3_lora_seq512_1024_mb1_iter1`
+- `0.5B` world-size-disambiguation suite, rebuilt:
+  `benchmark_artifacts/qwen25_05b_zero2_world3_lora_seq512_1024_mb1_iter2`
+- `1.5B` world-size-disambiguation suite, measured on `3 x 80GB`:
+  `benchmark_artifacts/qwen25_15b_zero2_world3_lora_seq512_1024_mb1_iter1`
+- `1.5B` world-size-disambiguation suite, rebuilt:
+  `benchmark_artifacts/qwen25_15b_zero2_world3_lora_seq512_1024_mb1_iter2`
+
+### Standard-Corpus Improvement
+
+Across the 32-case standard ZeRO-2 corpus spanning `0.5B`, `1.5B`, and `7B`:
+
+- before this pass:
+  - mean global peak error: `0.312 GiB`
+  - median global relative error: `2.64%`
+  - max global relative error: `15.37%`
+  - LoRA mean global peak error: `0.341 GiB`
+  - LoRA median global relative error: `3.57%`
+  - LoRA max global relative error: `15.37%`
+- after this pass:
+  - mean global peak error: `0.165 GiB`
+  - median global relative error: `0.87%`
+  - max global relative error: `6.08%`
+  - LoRA mean global peak error: `0.080 GiB`
+  - LoRA median global relative error: `0.70%`
+  - LoRA max global relative error: `2.40%`
+
+### Suite-Level Before/After
+
+- `0.5B`, short-context standard:
+  - before mean error: `0.327 GiB`
+  - after mean error: `0.186 GiB`
+- `1.5B`, short-context standard:
+  - before mean error: `0.281 GiB`
+  - after mean error: `0.151 GiB`
+- `0.5B`, long-context standard:
+  - before mean error: `0.439 GiB`
+  - after mean error: `0.195 GiB`
+- `1.5B`, long-context standard:
+  - before mean error: `0.303 GiB`
+  - after mean error: `0.149 GiB`
+- `7B`, standard:
+  - before mean error: `0.346 GiB`
+  - after mean error: `0.239 GiB`
+- `0.5B`, `3 x 80GB` LoRA validation:
+  - before mean error: `0.119 GiB`
+  - after mean error: `0.030 GiB`
+- `1.5B`, `3 x 80GB` LoRA validation:
+  - before mean error: `0.259 GiB`
+  - after mean error: `0.089 GiB`
+
+### Flash And Checkpointing Validation
+
+The new phase-decomposed LoRA branch generalized cleanly on long-context flash
+ZeRO-2 suites:
+
+- `0.5B` flash long-context:
+  - before mean error: `0.201 GiB`
+  - after mean error: `0.195 GiB`
+  - before LoRA mean error: `0.067 GiB`
+  - after LoRA mean error: `0.055 GiB`
+- `1.5B` flash long-context:
+  - before mean error: `0.141 GiB`
+  - after mean error: `0.149 GiB`
+  - before LoRA mean error: `0.198 GiB`
+  - after LoRA mean error: `0.213 GiB`
+
+Short-context flash and checkpointed suites moved only slightly. Those cases are
+already low-error and remain dominated by the same global peak phase, so this
+iteration prioritized cross-size structural correctness on the standard corpus.
 
 Interpretation:
 
@@ -176,22 +327,22 @@ Interpretation:
 - The likely reason is that ZeRO-2 `full_ft` remains optimizer-step dominated
   and ZeRO-2 LoRA remains backward dominated, so any forward/backward attention
   savings do not move the overall maximum.
-- Workspace-proxy instrumentation still matters because attention-kernel
-  differences could show up in phase-local or op-local analysis even when the
-  global maximum is unchanged.
+- In this measurement contract, `activation_bytes` represents retained tensors.
+  Flash-related differences must therefore be modeled in workspace terms or
+  phase placement, not as retained-activation savings.
 
 ## Gradient Checkpointing Under ZeRO-2
 
 Measured checkpointed suites were rebuilt against the current estimator:
 
 - `Qwen/Qwen2.5-0.5B`
-  - mean global peak error: `0.218 GiB`
-  - median global relative error: `3.30%`
-  - max global relative error: `7.86%`
+  - rebuilt suite mean global peak error: `0.183 GiB`
+  - rebuilt suite median global relative error: `1.17%`
+  - rebuilt suite max global relative error: `6.08%`
 - `Qwen/Qwen2.5-1.5B`
-  - mean global peak error: `0.241 GiB`
-  - median global relative error: `1.50%`
-  - max global relative error: `2.76%`
+  - rebuilt suite mean global peak error: `0.117 GiB`
+  - rebuilt suite median global relative error: `0.33%`
+  - rebuilt suite max global relative error: `1.51%`
 
 For this ZeRO-2 corpus, the measured global peak bytes were also identical to
 the non-checkpointed ZeRO-2 suites in every matched case.
@@ -206,9 +357,9 @@ Interpretation:
 
 ## Remaining Gaps
 
-- `runtime_reserve_bytes` is still the roughest component term in the ZeRO-2
-  branch even though global peak alignment is now good.
-- Forward-phase workspace proxies are still under-modeled, especially on the
-  larger model.
-- FlashAttention has not yet been measured together with ZeRO-2 in the current
-  corpus.
+- `runtime_reserve_bytes` and phase-local workspace proxies remain rougher than
+  global peak bytes even after the structural fixes.
+- The current high-quality fit is for the Qwen dense-decoder ZeRO-2 corpus.
+  Other architectures still need their own measurement passes.
+- If FlashAttention or checkpointing ever moves the global peak on a future
+  corpus, the estimator will need a dedicated workspace model for that regime.

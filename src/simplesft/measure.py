@@ -9,11 +9,14 @@ from typing import Any, Iterator, cast
 
 import torch
 
-from .attribution import build_workspace_proxy_metadata
+from .attribution import (
+    build_reserved_carryover_metadata,
+    build_workspace_proxy_metadata,
+)
 from .constants import PHASE_PEAK_CANDIDATES
 from .estimate import estimate_lora_parameter_count
 from .inspect import inspect_model
-from .runtime import load_pretrained_causal_lm
+from .runtime import load_pretrained_model
 from .types import (
     MemoryComponentBreakdown,
     MemoryResult,
@@ -31,7 +34,11 @@ from .utils import (
 
 
 @contextmanager
-def _activation_tracker(model: torch.nn.Module) -> Iterator[dict[str, int]]:
+def _activation_tracker(
+    *,
+    model: torch.nn.Module,
+    config: TrainingConfig,
+) -> Iterator[dict[str, int]]:
     """Track per-block activation summaries via forward hooks.
 
     Args:
@@ -57,12 +64,17 @@ def _activation_tracker(model: torch.nn.Module) -> Iterator[dict[str, int]]:
                     for item in output
                     if isinstance(item, torch.Tensor)
                 )
-                activations[module_name] = activations.get(module_name, 0) + tensor_bytes
+                activations[module_name] = (
+                    activations.get(module_name, 0) + tensor_bytes
+                )
 
         return _record
 
     for module_name, module in model.named_modules():
-        if any(token in module_name for token in ("layers.", "h.")):
+        if any(
+            token in module_name
+            for token in config.measurement_activation_module_tokens
+        ):
             handles.append(module.register_forward_hook(hook(module_name=module_name)))
     try:
         yield activations
@@ -108,7 +120,9 @@ def _phase_record(
 def _parameter_bytes(model: torch.nn.Module) -> int:
     """Return live parameter memory in bytes."""
 
-    return sum(parameter.numel() * parameter.element_size() for parameter in model.parameters())
+    return sum(
+        parameter.numel() * parameter.element_size() for parameter in model.parameters()
+    )
 
 
 def _gradient_bytes(model: torch.nn.Module) -> int:
@@ -124,7 +138,10 @@ def _gradient_bytes(model: torch.nn.Module) -> int:
 def _optimizer_state_bytes(optimizer: torch.optim.Optimizer) -> int:
     """Return optimizer state tensor bytes."""
 
-    if hasattr(optimizer, "optimizer") and getattr(optimizer, "optimizer") is not optimizer:
+    if (
+        hasattr(optimizer, "optimizer")
+        and getattr(optimizer, "optimizer") is not optimizer
+    ):
         nested_optimizer = cast(torch.optim.Optimizer, getattr(optimizer, "optimizer"))
         return _optimizer_state_bytes(optimizer=nested_optimizer)
     tensor_bytes = 0
@@ -136,15 +153,44 @@ def _optimizer_state_bytes(optimizer: torch.optim.Optimizer) -> int:
     return tensor_bytes
 
 
-def _activation_breakdown(activations: dict[str, int]) -> tuple[int, int]:
+def _activation_breakdown(
+    *,
+    activations: dict[str, int],
+    config: TrainingConfig,
+) -> tuple[int, int]:
     """Return activation bytes split between attention and non-attention blocks."""
 
     attention_bytes = sum(
         num_bytes
         for module_name, num_bytes in activations.items()
-        if "attn" in module_name or "attention" in module_name
+        if any(
+            token in module_name for token in config.measurement_attention_module_tokens
+        )
     )
     return attention_bytes, sum(activations.values()) - attention_bytes
+
+
+def _phase_by_name(
+    *,
+    phase_records: list[PhaseMemoryRecord],
+) -> dict[str, PhaseMemoryRecord]:
+    """Return phase records keyed by phase name."""
+
+    return {record.phase_name: record for record in phase_records}
+
+
+def _retained_activation_proxy_bytes(
+    *,
+    phase_records: list[PhaseMemoryRecord],
+) -> int:
+    """Return retained activations from the post-forward allocated delta."""
+
+    phase_by_name = _phase_by_name(phase_records=phase_records)
+    return max(
+        0,
+        phase_by_name["forward"].allocated_bytes
+        - phase_by_name["batch_materialization"].allocated_bytes,
+    )
 
 
 def _make_synthetic_batch(
@@ -153,7 +199,28 @@ def _make_synthetic_batch(
     config: TrainingConfig,
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
-    """Create a synthetic causal LM batch for measurement."""
+    """Create a synthetic training batch for measurement."""
+
+    if model_spec.supports_vision_inputs() and config.vision_images_per_sample > 0:
+        return _make_qwen_vision_batch(
+            model_spec=model_spec,
+            config=config,
+            device=device,
+        )
+    return _make_text_batch(
+        model_spec=model_spec,
+        config=config,
+        device=device,
+    )
+
+
+def _make_text_batch(
+    *,
+    model_spec: ModelSpec,
+    config: TrainingConfig,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    """Create a text-only synthetic training batch."""
 
     input_ids = torch.randint(
         low=0,
@@ -161,11 +228,110 @@ def _make_synthetic_batch(
         size=(config.micro_batch_size_per_gpu, config.max_seq_len),
         device=device,
     )
+    attention_mask = torch.full_like(
+        input_ids,
+        fill_value=config.synthetic_attention_mask_value,
+        device=device,
+    )
+    if config.synthetic_labels_mode == "clone_input_ids":
+        labels = input_ids.clone()
+    elif config.synthetic_labels_mode == "zeros":
+        labels = torch.zeros_like(input_ids, device=device)
+    else:
+        raise AssertionError(
+            f"Unsupported synthetic_labels_mode: {config.synthetic_labels_mode}"
+        )
     return {
         "input_ids": input_ids,
-        "attention_mask": torch.ones_like(input_ids, device=device),
-        "labels": input_ids.clone(),
+        "attention_mask": attention_mask,
+        "labels": labels,
     }
+
+
+def _make_qwen_vision_batch(
+    *,
+    model_spec: ModelSpec,
+    config: TrainingConfig,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    """Create a Qwen-VL style synthetic batch with one or more images."""
+
+    assert model_spec.vision is not None
+    vision_spec = model_spec.vision
+    assert (
+        vision_spec.supports_images()
+    ), "Vision metadata is incomplete for image inputs."
+    assert vision_spec.image_token_id is not None
+    assert vision_spec.vision_start_token_id is not None
+    assert vision_spec.vision_end_token_id is not None
+    batch_size = config.micro_batch_size_per_gpu
+    image_token_count = vision_spec.image_token_count(
+        image_size=config.vision_image_size,
+    )
+    image_span_count = config.vision_images_per_sample
+    text_token_count = max(config.max_seq_len - (2 * image_span_count), 0)
+    vision_start = torch.full(
+        (batch_size, 1),
+        fill_value=vision_spec.vision_start_token_id,
+        device=device,
+        dtype=torch.long,
+    )
+    image_tokens = torch.full(
+        (batch_size, image_token_count),
+        fill_value=vision_spec.image_token_id,
+        device=device,
+        dtype=torch.long,
+    )
+    vision_end = torch.full(
+        (batch_size, 1),
+        fill_value=vision_spec.vision_end_token_id,
+        device=device,
+        dtype=torch.long,
+    )
+    segments = [
+        tensor
+        for _ in range(image_span_count)
+        for tensor in (vision_start, image_tokens, vision_end)
+    ]
+    text_tokens = torch.randint(
+        low=0,
+        high=model_spec.vocab_size,
+        size=(batch_size, text_token_count),
+        device=device,
+    )
+    input_ids = torch.cat((*segments, text_tokens), dim=1)
+    attention_mask = torch.ones_like(input_ids, device=device)
+    labels = input_ids.clone()
+    labels[:, : image_span_count * (image_token_count + 2)] = -100
+    grid_side = vision_spec.grid_side(image_size=config.vision_image_size)
+    patch_rows = batch_size * image_span_count * grid_side * grid_side
+    pixel_values = torch.zeros(
+        (patch_rows, vision_spec.flattened_patch_dim()),
+        dtype=torch.float32,
+        device=device,
+    )
+    image_grid_thw = torch.tensor(
+        [[1, grid_side, grid_side]],
+        dtype=torch.long,
+        device=device,
+    ).repeat(batch_size * image_span_count, 1)
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "labels": labels,
+        "pixel_values": pixel_values,
+        "image_grid_thw": image_grid_thw,
+    }
+
+
+def _resolve_lora_task_type(*, config: TrainingConfig, peft_module: Any) -> Any:
+    """Return the PEFT task type requested by the config."""
+
+    task_type_name = config.measurement_lora_task_type.upper()
+    assert hasattr(
+        peft_module.TaskType, task_type_name
+    ), f"Unsupported PEFT task type: {config.measurement_lora_task_type}"
+    return getattr(peft_module.TaskType, task_type_name)
 
 
 def _apply_lora(
@@ -183,7 +349,7 @@ def _apply_lora(
         lora_dropout=config.lora.dropout,
         target_modules=list(config.lora.target_modules),
         bias=config.lora.bias,
-        task_type=peft.TaskType.CAUSAL_LM,
+        task_type=_resolve_lora_task_type(config=config, peft_module=peft),
     )
     return peft.get_peft_model(model=model, peft_config=lora_config)
 
@@ -191,32 +357,97 @@ def _apply_lora(
 def _load_model(
     *,
     model_ref: str,
+    model_spec: ModelSpec,
     config: TrainingConfig,
     device: torch.device,
 ) -> torch.nn.Module:
     """Load the model and apply the requested tuning mode."""
 
-    loaded_model = load_pretrained_causal_lm(
+    loaded_model = load_pretrained_model(
         model_ref=model_ref,
+        model_type=model_spec.model_type,
         torch_dtype=canonical_torch_dtype(config.weight_dtype),
         attention_backend=config.attention_backend,
-        low_cpu_mem_usage=True,
+        low_cpu_mem_usage=config.measurement_low_cpu_mem_usage,
+        trust_remote_code=config.trust_remote_code,
     )
     loaded_model_any = cast(Any, loaded_model)
     model = cast(torch.nn.Module, loaded_model_any.to(device))
     if config.tuning_mode == "lora":
         model = _apply_lora(model=model, config=config)
     else:
-        assert config.tuning_mode == "full_ft", f"Unsupported tuning mode: {config.tuning_mode}"
+        assert (
+            config.tuning_mode == "full_ft"
+        ), f"Unsupported tuning mode: {config.tuning_mode}"
     return model
 
 
-def _build_optimizer(*, model: torch.nn.Module) -> torch.optim.Optimizer:
-    """Build the AdamW optimizer for trainable model parameters."""
+def _build_optimizer(
+    *,
+    model: torch.nn.Module,
+    config: TrainingConfig,
+) -> torch.optim.Optimizer:
+    """Build the requested optimizer for trainable model parameters."""
 
-    return torch.optim.AdamW(
-        params=[parameter for parameter in model.parameters() if parameter.requires_grad],
-        lr=1e-4,
+    parameters = [
+        parameter for parameter in model.parameters() if parameter.requires_grad
+    ]
+    optimizer_name = config.optimizer_name.lower()
+    if optimizer_name == "adamw":
+        return torch.optim.AdamW(
+            params=parameters,
+            lr=config.optimizer_learning_rate,
+            betas=(config.optimizer_beta1, config.optimizer_beta2),
+            eps=config.optimizer_epsilon,
+            weight_decay=config.optimizer_weight_decay,
+        )
+    if optimizer_name == "adam":
+        return torch.optim.Adam(
+            params=parameters,
+            lr=config.optimizer_learning_rate,
+            betas=(config.optimizer_beta1, config.optimizer_beta2),
+            eps=config.optimizer_epsilon,
+            weight_decay=config.optimizer_weight_decay,
+        )
+    if optimizer_name == "sgd":
+        return torch.optim.SGD(
+            params=parameters,
+            lr=config.optimizer_learning_rate,
+            momentum=config.optimizer_momentum,
+            weight_decay=config.optimizer_weight_decay,
+        )
+    if optimizer_name == "rmsprop":
+        return torch.optim.RMSprop(
+            params=parameters,
+            lr=config.optimizer_learning_rate,
+            alpha=config.optimizer_alpha,
+            eps=config.optimizer_epsilon,
+            momentum=config.optimizer_momentum,
+            centered=config.optimizer_centered,
+            weight_decay=config.optimizer_weight_decay,
+        )
+    if optimizer_name == "adagrad":
+        return torch.optim.Adagrad(
+            params=parameters,
+            lr=config.optimizer_learning_rate,
+            eps=config.optimizer_epsilon,
+            weight_decay=config.optimizer_weight_decay,
+        )
+    if optimizer_name == "adafactor":
+        from transformers.optimization import Adafactor
+
+        return Adafactor(
+            params=parameters,
+            lr=config.optimizer_learning_rate,
+            eps=(config.optimizer_epsilon, config.optimizer_epsilon),
+            weight_decay=config.optimizer_weight_decay,
+            scale_parameter=False,
+            relative_step=False,
+            warmup_init=False,
+            beta1=config.optimizer_beta1 if config.optimizer_momentum > 0 else None,
+        )
+    raise AssertionError(
+        f"Unsupported optimizer for measurement: {config.optimizer_name}"
     )
 
 
@@ -284,7 +515,7 @@ def _capture_measurement_phases(
     state_snapshots["baseline_reserved_bytes"] = phase_records[-1].reserved_bytes
     batch = _make_synthetic_batch(model_spec=model_spec, config=config, device=device)
     capture_phase("batch_materialization", "measured")
-    with _activation_tracker(model=model) as activations:
+    with _activation_tracker(model=model, config=config) as activations:
         outputs = model(**batch)
         capture_phase("forward", "measured", "activation_summary")
         capture_phase("loss_materialization", "measured")
@@ -314,7 +545,8 @@ def _build_measured_breakdown(
     """Build a modular measured breakdown from live runtime state."""
 
     attention_activation_bytes, other_activation_bytes = _activation_breakdown(
-        activations=activations
+        activations=activations,
+        config=config,
     )
     parameter_bytes = _parameter_bytes(model=model)
     gradient_bytes = max(
@@ -322,11 +554,16 @@ def _build_measured_breakdown(
         state_snapshots.get("gradient_bytes_after_step", 0),
     )
     optimizer_state_bytes = state_snapshots.get("optimizer_state_bytes_after_step", 0)
-    activation_bytes = attention_activation_bytes + other_activation_bytes
+    hook_visible_activation_bytes = attention_activation_bytes + other_activation_bytes
+    retained_activation_bytes = _retained_activation_proxy_bytes(
+        phase_records=phase_records,
+    )
     observed_peak_bytes = max(record.peak_reserved_bytes for record in phase_records)
     optimizer_in_baseline = optimizer_state_in_baseline(
         warmup_steps=config.warmup_steps,
-        optimizer_name=config.optimizer_name,
+        optimizer_state_in_baseline_after_warmup=(
+            config.optimizer_state_in_baseline_after_warmup
+        ),
     )
     runtime_reserve_bytes = max(
         0,
@@ -346,26 +583,34 @@ def _build_measured_breakdown(
     if optimizer_in_baseline:
         accounted_bytes += optimizer_state_bytes
     if peak_phase_record.phase_name == "backward":
-        accounted_bytes += gradient_bytes + activation_bytes
+        accounted_bytes += gradient_bytes + retained_activation_bytes
     if peak_phase_record.phase_name == "optimizer_step":
         accounted_bytes += gradient_bytes
         if not optimizer_in_baseline:
             accounted_bytes += optimizer_state_bytes
     if peak_phase_record.phase_name == "forward":
-        accounted_bytes += activation_bytes
+        accounted_bytes += retained_activation_bytes
     return (
         MemoryComponentBreakdown(
             parameter_bytes=parameter_bytes,
             gradient_bytes=gradient_bytes,
             optimizer_state_bytes=optimizer_state_bytes,
-            activation_bytes=activation_bytes,
+            activation_bytes=retained_activation_bytes,
             transient_bytes=max(0, observed_peak_bytes - accounted_bytes),
             residual_bytes=0,
             runtime_reserve_bytes=runtime_reserve_bytes,
         ),
         {
+            "retained_activation_bytes": retained_activation_bytes,
+            "hook_visible_activation_bytes": hook_visible_activation_bytes,
+            "hook_visible_attention_activation_bytes": attention_activation_bytes,
+            "hook_visible_other_activation_bytes": other_activation_bytes,
             "attention_activation_bytes": attention_activation_bytes,
             "other_activation_bytes": other_activation_bytes,
+            "hook_visible_activation_gap_bytes": max(
+                0,
+                hook_visible_activation_bytes - retained_activation_bytes,
+            ),
         },
     )
 
@@ -378,29 +623,41 @@ def _build_measurement_assumptions(
     """Build measurement assumptions and notes."""
 
     assumptions = [
-        "Measurement uses module-level activation summaries rather than per-op tracing.",
+        "Measurement reports retained activations from the post-forward allocated delta.",
+        "Measurement also keeps hook-visible activation summaries separate from retained activations.",
         "Gradient and optimizer-state bytes are captured from phase-local snapshots.",
     ]
     if optimizer_state_in_baseline(
         warmup_steps=config.warmup_steps,
-        optimizer_name=config.optimizer_name,
+        optimizer_state_in_baseline_after_warmup=(
+            config.optimizer_state_in_baseline_after_warmup
+        ),
     ):
-        assumptions.append("Warmup materializes optimizer state before the measured step.")
+        assumptions.append(
+            "Warmup materializes optimizer state before the measured step."
+        )
     if config.tuning_mode == "lora":
-        assert config.lora is not None, "LoRA config is required for tuning_mode='lora'."
+        assert (
+            config.lora is not None
+        ), "LoRA config is required for tuning_mode='lora'."
         assumptions.append(
             "Estimated trainable LoRA params: "
             f"{estimate_lora_parameter_count(model_spec=model_spec, lora_config=config.lora)}"
         )
+    if model_spec.supports_vision_inputs() and config.vision_images_per_sample > 0:
+        assumptions.append(
+            "Vision-language measurement uses synthetic Qwen-style image placeholders "
+            "plus zero-valued pixel patches."
+        )
     return tuple(assumptions)
 
 
-def _measure_zero2_requires_multi_gpu() -> None:
-    """Raise a clear error for unsupported single-rank ZeRO-2 measurement."""
+def _measure_zero_requires_multi_gpu(*, distributed_mode: str) -> None:
+    """Raise a clear error for unsupported single-rank ZeRO measurement."""
 
     raise RuntimeError(
-        "ZeRO-2 measurement requires at least two GPUs so optimizer states and gradients "
-        "can actually be sharded."
+        f"{distributed_mode} measurement requires at least two GPUs so optimizer states, "
+        "parameters, and gradients can actually be sharded."
     )
 
 
@@ -429,8 +686,8 @@ def _maybe_wrap_ddp_model(
         module=model,
         device_ids=[device_index],
         output_device=device_index,
-        broadcast_buffers=False,
-        init_sync=False,
+        broadcast_buffers=config.measurement_ddp_broadcast_buffers,
+        init_sync=config.measurement_ddp_init_sync,
     )
 
 
@@ -445,6 +702,18 @@ def _maybe_barrier(*, config: TrainingConfig) -> None:
         dist.barrier(device_ids=[torch.cuda.current_device()])
 
 
+def _runtime_attention_implementation(*, model: torch.nn.Module) -> str:
+    """Return the actual runtime attention implementation for a loaded model."""
+
+    model_config = getattr(getattr(model, "module", model), "config", None)
+    if model_config is None:
+        return "unknown"
+    implementation = getattr(model_config, "_attn_implementation", None)
+    if implementation is None:
+        implementation = getattr(model_config, "attn_implementation", None)
+    return str(implementation or "default")
+
+
 def _build_memory_result(
     *,
     model_spec: ModelSpec,
@@ -453,6 +722,7 @@ def _build_memory_result(
     breakdown: MemoryComponentBreakdown,
     activation_metadata: dict[str, int],
     state_snapshots: dict[str, int],
+    extra_metadata: dict[str, Any] | None = None,
 ) -> MemoryResult:
     """Build a `MemoryResult` from measured phase records and breakdowns."""
 
@@ -483,11 +753,17 @@ def _build_memory_result(
             "world_size": config.world_size(),
             "optimizer_state_in_baseline": optimizer_state_in_baseline(
                 warmup_steps=config.warmup_steps,
-                optimizer_name=config.optimizer_name,
+                optimizer_state_in_baseline_after_warmup=(
+                    config.optimizer_state_in_baseline_after_warmup
+                ),
             ),
-            "baseline_reserved_bytes": state_snapshots.get("baseline_reserved_bytes", 0),
+            "baseline_reserved_bytes": state_snapshots.get(
+                "baseline_reserved_bytes", 0
+            ),
+            **(extra_metadata or {}),
             **activation_metadata,
             **workspace_proxy_metadata,
+            **build_reserved_carryover_metadata(phase_records=phase_records),
         },
         assumptions=_build_measurement_assumptions(
             model_spec=model_spec,
@@ -504,12 +780,25 @@ def _measure_local_peak_memory(
 ) -> MemoryResult:
     """Measure one local rank on its assigned CUDA device."""
 
-    model_spec = inspect_model(model_ref=model) if isinstance(model, str) else model
+    model_spec = (
+        inspect_model(
+            model_ref=model,
+            trust_remote_code=config.trust_remote_code,
+            supported_model_types=config.supported_model_types,
+            default_attention_type=config.default_attention_type,
+            intermediate_size_fallback_multiplier=(
+                config.intermediate_size_fallback_multiplier
+            ),
+        )
+        if isinstance(model, str)
+        else model
+    )
     device = torch.device("cuda", device_index)
     torch.cuda.set_device(device=device)
     model_ref = model if isinstance(model, str) else model.model_name
     model_instance = _load_model(
         model_ref=model_ref,
+        model_spec=model_spec,
         config=config,
         device=device,
     )
@@ -521,7 +810,7 @@ def _measure_local_peak_memory(
         config=config,
         device_index=device_index,
     )
-    optimizer = _build_optimizer(model=model_instance)
+    optimizer = _build_optimizer(model=model_instance, config=config)
     _maybe_barrier(config=config)
     _run_warmup_steps(
         model=model_instance,
@@ -552,6 +841,11 @@ def _measure_local_peak_memory(
         breakdown=breakdown,
         activation_metadata=activation_metadata,
         state_snapshots=state_snapshots,
+        extra_metadata={
+            "runtime_attention_implementation": _runtime_attention_implementation(
+                model=model_instance,
+            )
+        },
     )
 
 
@@ -566,7 +860,11 @@ def _aggregate_phase_records(
     phase_records = []
     for phase_name in phase_names:
         phase_group = [
-            next(record for record in result.phase_records if record.phase_name == phase_name)
+            next(
+                record
+                for record in result.phase_records
+                if record.phase_name == phase_name
+            )
             for result in results
         ]
         phase_records.append(
@@ -598,7 +896,9 @@ def _aggregate_breakdown(*, results: list[MemoryResult]) -> MemoryComponentBreak
     return MemoryComponentBreakdown(
         parameter_bytes=max(result.breakdown.parameter_bytes for result in results),
         gradient_bytes=max(result.breakdown.gradient_bytes for result in results),
-        optimizer_state_bytes=max(result.breakdown.optimizer_state_bytes for result in results),
+        optimizer_state_bytes=max(
+            result.breakdown.optimizer_state_bytes for result in results
+        ),
         activation_bytes=max(result.breakdown.activation_bytes for result in results),
         transient_bytes=max(result.breakdown.transient_bytes for result in results),
         residual_bytes=max(result.breakdown.residual_bytes for result in results),
@@ -606,6 +906,21 @@ def _aggregate_breakdown(*, results: list[MemoryResult]) -> MemoryComponentBreak
             result.breakdown.runtime_reserve_bytes for result in results
         ),
     )
+
+
+def _aggregate_numeric_metadata(*, results: list[MemoryResult]) -> dict[str, int]:
+    """Aggregate conservative max numeric metadata across ranks."""
+
+    numeric_keys = {
+        key
+        for result in results
+        for key, value in result.metadata.items()
+        if isinstance(value, int)
+    }
+    return {
+        key: max(int(result.metadata.get(key, 0)) for result in results)
+        for key in numeric_keys
+    }
 
 
 def aggregate_rank_results(
@@ -638,6 +953,7 @@ def aggregate_rank_results(
         feasible=global_peak_bytes <= int(results[0].config.gpu_memory_gb * (1024**3)),
         metadata={
             **results[0].metadata,
+            **_aggregate_numeric_metadata(results=results),
             "aggregated_across_ranks": True,
             "rank_aggregation_tag": aggregation_tag,
             "per_rank_global_peak_bytes": [
@@ -672,16 +988,24 @@ def measure_peak_memory(
         RuntimeError: CUDA is required for measurement.
     """
 
-    if config.distributed_mode == "zero2":
+    if config.uses_tensor_parallel() or config.sequence_parallel:
+        raise RuntimeError(
+            "Measurement does not yet support tensor_parallel_degree > 1 "
+            "or sequence_parallel=True."
+        )
+    if config.distributed_mode in {"zero2", "zero3"}:
         maybe_get_deepspeed()
         if config.world_size() <= 1:
-            _measure_zero2_requires_multi_gpu()
+            _measure_zero_requires_multi_gpu(
+                distributed_mode=config.distributed_mode,
+            )
         from .distributed_zero2_measure import run_zero2_measurement
 
         return run_zero2_measurement(model=model, config=config)
-    assert config.distributed_mode in {"single_gpu", "ddp"}, (
-        "Measurement currently supports single_gpu, ddp, and zero2 runtime shapes only."
-    )
+    assert config.distributed_mode in {
+        "single_gpu",
+        "ddp",
+    }, "Measurement currently supports single_gpu, ddp, zero2, and zero3 runtime shapes only."
     if not is_cuda_available():
         raise RuntimeError("CUDA is required for measurement.")
     if config.distributed_mode == "ddp" and config.world_size() > 1:

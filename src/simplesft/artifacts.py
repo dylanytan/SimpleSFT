@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any
 
@@ -12,14 +12,22 @@ from .types import (
     BenchmarkCaseResult,
     BenchmarkSuiteResult,
     ComparisonResult,
+    EstimatorConfig,
+    EstimatorDebugInfo,
+    ResidentStateDebug,
+    ActivationDebug,
+    WorkspaceDebug,
+    PhasePeakDebug,
     LoRAConfig,
+    MeasurementConfig,
     MemoryComponentBreakdown,
     MemoryResult,
     ModelLinearLayerSpec,
+    ModelParameterSpec,
     ModelSpec,
     PhaseMemoryRecord,
     SearchResult,
-    TrainingConfig,
+    VisionSpec,
 )
 
 
@@ -57,7 +65,9 @@ def save_comparison_result(*, result: ComparisonResult, path: str | Path) -> Non
     write_json_artifact(path=path, payload=asdict(result))
 
 
-def save_benchmark_suite_result(*, result: BenchmarkSuiteResult, path: str | Path) -> None:
+def save_benchmark_suite_result(
+    *, result: BenchmarkSuiteResult, path: str | Path
+) -> None:
     """Serialize a `BenchmarkSuiteResult` to JSON."""
 
     write_json_artifact(path=path, payload=asdict(result))
@@ -83,31 +93,30 @@ def _load_lora_config(raw: dict[str, Any] | None) -> LoRAConfig | None:
     )
 
 
-def _load_training_config(raw: dict[str, Any]) -> TrainingConfig:
-    """Deserialize a `TrainingConfig` payload."""
+def _load_estimator_config(raw: dict[str, Any]) -> EstimatorConfig:
+    """Deserialize an `EstimatorConfig` payload."""
 
-    return TrainingConfig(
-        tuning_mode=raw["tuning_mode"],
-        optimizer_name=raw["optimizer_name"],
-        weight_dtype=raw["weight_dtype"],
-        grad_dtype=raw["grad_dtype"],
-        master_weight_dtype=raw["master_weight_dtype"],
-        optimizer_state_dtype=raw["optimizer_state_dtype"],
-        micro_batch_size_per_gpu=raw["micro_batch_size_per_gpu"],
-        gradient_accumulation_steps=raw["gradient_accumulation_steps"],
-        max_seq_len=raw["max_seq_len"],
-        gradient_checkpointing=raw["gradient_checkpointing"],
-        attention_backend=raw["attention_backend"],
-        distributed_mode=raw["distributed_mode"],
-        num_nodes=raw["num_nodes"],
-        gpus_per_node=raw["gpus_per_node"],
-        gpu_memory_gb=raw["gpu_memory_gb"],
-        lora=_load_lora_config(raw=raw["lora"]),
-        use_master_weights=raw["use_master_weights"],
-        reserved_vram_gb_per_gpu=raw["reserved_vram_gb_per_gpu"],
-        activation_safety_margin_gb=raw["activation_safety_margin_gb"],
-        warmup_steps=raw["warmup_steps"],
-    )
+    payload = {
+        key: value
+        for key, value in raw.items()
+        if key in {field_info.name for field_info in fields(EstimatorConfig)}
+    }
+    if "lora" in payload:
+        payload["lora"] = _load_lora_config(raw=payload["lora"])
+    return EstimatorConfig(**payload)
+
+
+def _load_measurement_config(raw: dict[str, Any]) -> MeasurementConfig:
+    """Deserialize a `MeasurementConfig` payload."""
+
+    payload = {
+        key: value
+        for key, value in raw.items()
+        if key in {field_info.name for field_info in fields(MeasurementConfig)}
+    }
+    if "lora" in payload:
+        payload["lora"] = _load_lora_config(raw=payload["lora"])
+    return MeasurementConfig(**payload)
 
 
 def _load_breakdown(raw: dict[str, Any]) -> MemoryComponentBreakdown:
@@ -131,20 +140,39 @@ def _load_phase_record(raw: dict[str, Any]) -> PhaseMemoryRecord:
     )
 
 
+def _load_estimator_debug(raw: dict[str, Any] | None) -> EstimatorDebugInfo | None:
+    """Deserialize the estimator debug payload when present."""
+
+    if raw is None:
+        return None
+    return EstimatorDebugInfo(
+        resident_state=ResidentStateDebug(**raw["resident_state"]),
+        activations=ActivationDebug(**raw["activations"]),
+        workspace=WorkspaceDebug(**raw["workspace"]),
+        phase_peaks=PhasePeakDebug(**raw["phase_peaks"]),
+    )
+
+
 def load_memory_result_from_raw(*, raw: dict[str, Any]) -> MemoryResult:
     """Load a `MemoryResult` from a raw dictionary."""
 
+    config_loader = _load_estimator_config
+    if raw["mode"] == "measure":
+        config_loader = _load_measurement_config
     return MemoryResult(
         mode=raw["mode"],
         model_name=raw["model_name"],
-        config=_load_training_config(raw=raw["config"]),
+        config=config_loader(raw=raw["config"]),
         breakdown=_load_breakdown(raw=raw["breakdown"]),
-        phase_records=tuple(_load_phase_record(raw=item) for item in raw["phase_records"]),
+        phase_records=tuple(
+            _load_phase_record(raw=item) for item in raw["phase_records"]
+        ),
         peak_phase=raw["peak_phase"],
         global_peak_bytes=raw["global_peak_bytes"],
         feasible=raw["feasible"],
-        metadata=raw["metadata"],
-        assumptions=tuple(raw["assumptions"]),
+        metadata=raw.get("metadata", {}),
+        debug=_load_estimator_debug(raw=raw.get("debug")),
+        assumptions=tuple(raw.get("assumptions", ())),
     )
 
 
@@ -171,6 +199,11 @@ def load_comparison_result(*, path: str | Path) -> ComparisonResult:
         component_relative_error=raw["component_relative_error"],
         workspace_proxy_error_bytes=raw.get("workspace_proxy_error_bytes", {}),
         workspace_proxy_relative_error=raw.get("workspace_proxy_relative_error", {}),
+        intermediate_term_error_bytes=raw.get("intermediate_term_error_bytes", {}),
+        intermediate_term_relative_error=raw.get(
+            "intermediate_term_relative_error",
+            {},
+        ),
         benchmark_metadata=raw["benchmark_metadata"],
         notes=tuple(raw["notes"]),
     )
@@ -203,7 +236,38 @@ def _load_model_spec(raw: dict[str, Any]) -> ModelSpec:
         trainable_linear_layers=tuple(
             _load_model_linear_layer(item) for item in raw["trainable_linear_layers"]
         ),
+        parameter_specs=tuple(
+            _load_model_parameter(item) for item in raw.get("parameter_specs", ())
+        ),
         attention_type=raw["attention_type"],
+        vision=_load_vision_spec(raw=raw.get("vision")),
+    )
+
+
+def _load_model_parameter(raw: dict[str, Any]) -> ModelParameterSpec:
+    """Deserialize a parameter-summary payload."""
+
+    return ModelParameterSpec(
+        parameter_name=raw["parameter_name"],
+        shape=tuple(raw["shape"]),
+        category=raw["category"],
+    )
+
+
+def _load_vision_spec(raw: dict[str, Any] | None) -> VisionSpec | None:
+    """Deserialize a vision-spec payload."""
+
+    if raw is None:
+        return None
+    return VisionSpec(
+        default_image_size=raw["default_image_size"],
+        patch_size=raw["patch_size"],
+        temporal_patch_size=raw["temporal_patch_size"],
+        spatial_merge_size=raw["spatial_merge_size"],
+        channels=raw.get("channels", 3),
+        image_token_id=raw.get("image_token_id"),
+        vision_start_token_id=raw.get("vision_start_token_id"),
+        vision_end_token_id=raw.get("vision_end_token_id"),
     )
 
 
@@ -217,7 +281,7 @@ def _load_benchmark_case(raw: dict[str, Any]) -> BenchmarkCase:
     return BenchmarkCase(
         name=raw["name"],
         model=model,
-        config=_load_training_config(raw=raw["config"]),
+        config=_load_measurement_config(raw=raw["config"]),
         tags=tuple(raw["tags"]),
     )
 
