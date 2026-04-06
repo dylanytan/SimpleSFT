@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from simplesft.attribution import (
+from simplesft.measurement.attribution import (
     build_reserved_carryover_metadata,
     build_workspace_proxy_metadata,
 )

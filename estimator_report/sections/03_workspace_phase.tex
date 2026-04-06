@@ -1,0 +1,316 @@
+\section{Workspace and Communication Windows}
+Resident state explains what is already sitting on the rank. Workspace explains
+what spikes only while a phase is running.
+
+\begin{quote}
+The estimator treats workspace as a \emph{live window}, not as a sum over every
+temporary allocation that might appear somewhere in the phase.
+\end{quote}
+
+That choice is deliberate. Most kernels do not keep every temporary alive at
+the same time, so summing all of them would be too pessimistic.
+
+\subsection{Forward and Backward Workspace}
+There are four main sources of phase-local workspace:
+\begin{itemize}[leftmargin=1.5em]
+\item attention workspace,
+\item MLP or backward-kernel workspace,
+\item communication workspace from tensor or sequence parallelism,
+\item loss materialization workspace.
+\end{itemize}
+
+\paragraph{Attention backend choice.}
+The estimator uses two different attention workspace models:
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{standard attention} scales with local tokens, local heads, and
+effective key length because that path really does materialize a larger
+score-like object,
+\item \textbf{sdpa} and \textbf{flash2} use a width-based proxy tied to the
+largest local attention-path width, because those kernels avoid the eager
+score-matrix behavior the standard path exhibits.
+\end{itemize}
+
+This is an important modeling choice: the estimator is not saying all attention
+backends behave the same and then patching them afterward. It starts from the
+fact that the kernel strategies are different.
+
+The two compact formulas are:
+\begin{align*}
+W_{\mathrm{attn,fwd}}^{\mathrm{standard}}
+&\propto
+T_{\mathrm{local}} \cdot h_{\mathrm{local}} \cdot S_{\mathrm{eff}}, \\
+W_{\mathrm{attn,fwd}}^{\mathrm{non\text{-}eager}}
+&\propto
+T_{\mathrm{local}} \cdot d_{\mathrm{attn,path}}.
+\end{align*}
+The exact constants differ, but the structural point is the important one:
+standard attention scales with a score-like object, while \texttt{sdpa} and
+\texttt{flash2} scale with the widest local attention path.
+
+\paragraph{Checkpointing.}
+Checkpointing shifts pressure from retained activations into backward-time
+recompute workspace. In practice that means:
+\begin{itemize}[leftmargin=1.5em]
+\item forward usually gets cheaper,
+\item backward gets an extra recompute term,
+\item total peak may move phases rather than simply shrinking everywhere.
+\end{itemize}
+
+\paragraph{Parallel communication.}
+If tensor parallel or sequence parallel is enabled, the estimator adds explicit
+communication windows for those exchanges. These are local windows. They are
+not global cluster totals.
+
+\subsection{Optimizer Update Scratch}
+The optimizer also needs its own temporary workspace. The simplest way to think
+about it is:
+
+\begin{quote}
+How much temporary storage does one rank need while it is actively applying one
+update to the trainable set it owns?
+\end{quote}
+
+For single-GPU and DDP, that scratch scales with the full local trainable set.
+For sharded ZeRO paths, it may scale with the local shard instead.
+
+The compact form is:
+\[
+W_{\mathrm{update}} \approx
+\text{local update elements} \times \text{update bytes per element}.
+\]
+
+\subsection{Configured Bucket Objects}
+Distributed training introduces another kind of workspace: reducer buckets,
+all-gather buckets, and prefetch buckets. The estimator now models those as
+explicit configured objects rather than hidden byte caps.
+
+\paragraph{DDP.}
+DDP has one reducer bucket. Its capacity is:
+\[
+B_{\mathrm{ddp}}^{\mathrm{cap}} =
+E_{\mathrm{ddp}} \cdot b_g^\star,
+\]
+where $E_{\mathrm{ddp}}$ is the configured bucket size in gradient elements.
+
+\paragraph{ZeRO.}
+ZeRO has three relevant bucket objects:
+\begin{itemize}[leftmargin=1.5em]
+\item an all-gather bucket,
+\item a reduce bucket,
+\item a prefetch bucket.
+\end{itemize}
+
+Their capacities come from configured element counts as well. Because the
+estimator is per-rank, it converts those distributed bucket sizes into local
+rank capacities by dividing over the data-parallel group before multiplying by
+the appropriate dtype width.
+
+The capacity equations are:
+\begin{align*}
+B_{\mathrm{zero,ag}}^{\mathrm{cap}} &=
+\dfrac{E_{\mathrm{zero}}}{D_{\mathrm{P}}} \cdot b_p^\star, \\
+B_{\mathrm{zero,red}}^{\mathrm{cap}} &=
+\dfrac{E_{\mathrm{zero}}}{D_{\mathrm{P}}} \cdot b_g^\star, \\
+B_{\mathrm{zero,pf}}^{\mathrm{cap}} &=
+\dfrac{E_{\mathrm{prefetch}}}{D_{\mathrm{P}}} \cdot b_p^\star.
+\end{align*}
+Again, the implementation rounds to whole elements, but the simplified form is
+easier to read and captures the real regime difference: these capacities shrink
+with the data-parallel degree.
+
+\paragraph{Capacity versus live bytes.}
+One subtle point matters here: the configured bucket size describes the
+capacity of the object, not the amount of useful payload that always fills it.
+The estimator therefore clips each bucket to the local payload that can
+actually occupy it. A rank cannot actively hold more gradient bytes than it
+owns, even if the configured reducer bucket is larger than that.
+
+That idea is captured by:
+\[
+B_{\mathrm{active}} = \min(B_{\mathrm{capacity}}, M_{\mathrm{local\ payload}}).
+\]
+
+\subsection{DDP and ZeRO Windows In Words}
+Once those bucket objects exist, the distributed windows become easier to read.
+
+\paragraph{DDP.}
+DDP contributes:
+\begin{itemize}[leftmargin=1.5em]
+\item the reducer bucket itself,
+\item and a communication overlap window that looks like ``local gradients plus
+the reducer bucket.''
+\end{itemize}
+
+\paragraph{ZeRO.}
+ZeRO contributes three windows:
+\begin{itemize}[leftmargin=1.5em]
+\item a \textbf{fetch window}, which is the local trainable payload plus the
+all-gather and prefetch buckets,
+\item an \textbf{update window}, which is the optimizer update scratch,
+\item a \textbf{communication window}, which is the local gradient payload plus
+the reduce bucket.
+\end{itemize}
+
+The estimator then takes the largest of those windows instead of summing them.
+That is the right abstraction for ``what is the largest temporary distributed
+object live on this rank during the optimizer phase?''
+
+The same idea in compact notation is:
+\begin{align*}
+W_{\mathrm{zero,fetch}} &=
+M_{\mathrm{train}} + B_{\mathrm{zero,ag}} + B_{\mathrm{zero,pf}}, \\
+W_{\mathrm{zero,comm}} &=
+M_{\mathrm{grads}} + B_{\mathrm{zero,red}}, \\
+W_{\mathrm{opt,zero}} &=
+\max\!\left(
+W_{\mathrm{zero,fetch}},
+W_{\mathrm{update}},
+B_{\mathrm{zero,red}}
+\right).
+\end{align*}
+
+\subsection{Why One ZeRO-2 Full-FT Lifetime Path Remains}
+One stage-specific path still remains for non-checkpointed \texttt{zero2
+full\_ft}. It is not there because the code wants a special case for its own
+sake. It is there because the canonical replay still shows a repeatable state
+lifetime pattern in that regime.
+
+The practical interpretation is:
+\begin{itemize}[leftmargin=1.5em]
+\item in backward, some gradient-related state behaves as if two copies of the
+local gradient payload can overlap with the reduce bucket,
+\item in optimizer step, the live window can include the master shard, local
+gradients, update scratch, parameter partition support, and the ZeRO bucket
+objects at the same time.
+\end{itemize}
+
+The report keeps this path explicit rather than pretending it comes from the
+generic ZeRO window model. That is the more honest presentation.
+
+The retained explicit lifetime path is:
+\begin{align*}
+W_{\mathrm{bwd}} &\leftarrow
+\max\!\left(W_{\mathrm{bwd}}, 2 M_{\mathrm{grads}} + B_{\mathrm{zero,red}}\right), \\
+\end{align*}
+\begin{multline*}
+W_{\mathrm{opt}} \leftarrow
+\max\!\Big(
+W_{\mathrm{opt}},
+M_{\mathrm{master,shard}}
++ 2 M_{\mathrm{grads}}
++ W_{\mathrm{update}} \\
++ M_{\mathrm{param\_partition}}
++ B_{\mathrm{zero,ag}}
++ B_{\mathrm{zero,pf}}
++ B_{\mathrm{zero,red}}
+\Big).
+\end{multline*}
+
+\subsection{Backward-End State}
+The optimizer step does not start from a perfectly clean floor. Some state is
+still live at the boundary between backward and the step. The estimator calls
+that the \emph{backward-end state}.
+
+The intuition is simple:
+\begin{itemize}[leftmargin=1.5em]
+\item single-GPU has no distributed bucket object to keep alive here,
+\item DDP typically carries local gradients plus the reducer bucket,
+\item ZeRO-2 carries local gradients plus the reduce bucket,
+\item ZeRO-3 carries local gradients plus the all-gather-side support object
+needed for the next step window.
+\end{itemize}
+
+This term matters because a lot of optimizer-step underestimation comes from
+forgetting that the step does not begin from an empty temporary state.
+
+The compact regime summary is:
+\[
+E_{\mathrm{bwd}} =
+\begin{cases}
+0 & \text{single\_gpu}, \\
+M_{\mathrm{grads}} + B_{\mathrm{ddp}} & \text{ddp}, \\
+M_{\mathrm{grads}} + B_{\mathrm{zero,red}} & \text{zero2}, \\
+M_{\mathrm{grads}} + B_{\mathrm{zero,ag}} & \text{zero3}.
+\end{cases}
+\]
+
+\section{Phase Assembly}
+At this point the estimator has everything it needs:
+\begin{itemize}[leftmargin=1.5em]
+\item resident floors,
+\item retained activations,
+\item backward-end state,
+\item phase-local workspace,
+\item optimizer-step carryover.
+\end{itemize}
+
+The three candidate peaks are then:
+\begin{align*}
+M_{\mathrm{forward}} &= R_{\mathrm{base}} + A_{\mathrm{fwd}} + W_{\mathrm{fwd}}, \\
+M_{\mathrm{backward}} &= R_{\mathrm{grad}} + A_{\mathrm{bwd}} + W_{\mathrm{bwd}}, \\
+M_{\mathrm{optimizer}} &=
+R_{\mathrm{grad}} + E_{\mathrm{bwd}} + W_{\mathrm{opt}} + C_{\mathrm{opt}}.
+\end{align*}
+
+\subsection{Optimizer Carryover}
+Carryover is the least elegant part of the estimator, so it deserves a plain
+language explanation.
+
+\begin{quote}
+Carryover means memory that is not part of the clean resident floor but still
+has not been released when the optimizer step begins.
+\end{quote}
+
+Different regimes carry different things:
+\begin{itemize}[leftmargin=1.5em]
+\item some non-checkpointed ZeRO-2 full-FT paths carry a meaningful fraction of
+the backward workspace or retained-forward state into the step,
+\item checkpointed full-FT ZeRO paths mainly carry backward activation state,
+\item checkpointed single-GPU LoRA can carry both retained-forward state and
+some backward workspace into the step,
+\item many simpler regimes carry essentially nothing extra.
+\end{itemize}
+
+The estimator keeps this logic as a short regime table in code because the
+lifetimes really are regime-dependent. The important thing is that the report
+states this openly instead of burying it in a single unexplained formula.
+
+A compact generic view is:
+\[
+C_{\mathrm{opt}} = M_{\mathrm{carry,extra}},
+\]
+where $M_{\mathrm{carry,extra}}$ means ``state still live at optimizer-step
+entry that has not already been counted in $R_{\mathrm{grad}} +
+E_{\mathrm{bwd}}$.''
+
+\subsection{Public Breakdown Semantics}
+The public memory breakdown is aligned to the winning phase, not to every phase
+at once.
+
+That means:
+\begin{itemize}[leftmargin=1.5em]
+\item parameter, gradient, optimizer-state, and runtime-reserve terms always
+show up directly,
+\item activation and transient terms depend on which phase actually wins,
+\item if optimizer step wins, the public activation bucket is intentionally set
+to zero and the phase-local excess is shown as transient memory instead.
+\end{itemize}
+
+This choice keeps the public output readable while still allowing phase-aligned
+calibration to compare like with like internally.
+
+\section{Empirical Assumptions That Remain}
+Most of the estimator is explicit tensor accounting. A few pieces still remain
+as measured or runtime-driven assumptions:
+\begin{itemize}[leftmargin=1.5em]
+\item the attention workspace formulas are still proxies for kernel behavior,
+not exact allocator traces,
+\item runtime support is a named support model, not a full CUDA allocator
+simulation,
+\item one stage-specific ZeRO-2 full-FT lifetime path remains because it still
+improves replay quality materially.
+\end{itemize}
+
+Those assumptions are kept narrow on purpose. The estimator works best when the
+core of the model stays about named objects and lifetimes, and only the truly
+backend-shaped pieces remain empirical.

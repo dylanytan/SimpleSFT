@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from simplesft.allocator_model import (
+from simplesft.measurement.allocator import (
     build_allocator_metadata,
     build_allocator_phase_states,
     selected_allocator_peak_state,

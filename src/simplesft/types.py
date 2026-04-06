@@ -6,6 +6,11 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from .models.architecture_types import (
+    ArchitectureFamilySpec,
+    AttentionSpec,
+    TensorLayoutSpec,
+)
 from .constants import BYTES_PER_GB, DEFAULT_TARGET_MODULES, SUPPORTED_MODEL_TYPES
 
 
@@ -133,6 +138,8 @@ class ModelLinearLayerSpec:
         input_dim: Layer input width.
         output_dim: Layer output width.
         category: High-level grouping such as attention or mlp.
+        role: Explicit architectural linear role.
+        tensor_parallel_role: Explicit TP layout role.
 
     Returns:
         Frozen dataclass representing one linear layer.
@@ -142,6 +149,8 @@ class ModelLinearLayerSpec:
     input_dim: int
     output_dim: int
     category: str
+    role: str = "other"
+    tensor_parallel_role: str = "replicated"
 
     def parameter_count(self) -> int:
         """Return the dense parameter count for the layer."""
@@ -157,6 +166,8 @@ class ModelParameterSpec:
         parameter_name: Qualified parameter name.
         shape: Parameter tensor shape.
         category: Coarse parameter category.
+        role: Explicit architectural parameter role.
+        tensor_parallel_role: Explicit TP layout role.
 
     Returns:
         Frozen dataclass representing one parameter tensor.
@@ -165,6 +176,8 @@ class ModelParameterSpec:
     parameter_name: str
     shape: tuple[int, ...]
     category: str
+    role: str = "other"
+    tensor_parallel_role: str = "replicated"
 
     def numel(self) -> int:
         """Return the total parameter count for this tensor."""
@@ -197,6 +210,9 @@ class ModelSpec:
         trainable_linear_layers: Linear layers relevant for LoRA accounting.
         parameter_specs: Named parameter shapes for optimizer-state accounting.
         attention_type: Normalized attention type label.
+        architecture_family: Explicit normalized architecture family metadata.
+        attention: Explicit attention-layout metadata.
+        tensor_layout: Explicit TP layout summary.
         vision: Optional image-input metadata for vision-language models.
 
     Returns:
@@ -232,7 +248,41 @@ class ModelSpec:
     trainable_linear_layers: tuple[ModelLinearLayerSpec, ...]
     parameter_specs: tuple[ModelParameterSpec, ...] = ()
     attention_type: str = "causal"
+    architecture_family: ArchitectureFamilySpec = field(
+        default_factory=ArchitectureFamilySpec
+    )
+    attention: AttentionSpec = field(default_factory=AttentionSpec)
+    tensor_layout: TensorLayoutSpec = field(default_factory=TensorLayoutSpec)
     vision: VisionSpec | None = None
+
+    def __post_init__(self) -> None:
+        """Backfill architecture metadata for incomplete model specs."""
+
+        if self.attention.num_query_heads <= 0:
+            object.__setattr__(
+                self,
+                "attention",
+                AttentionSpec(
+                    num_query_heads=self.num_attention_heads,
+                    num_key_value_heads=max(1, self.num_attention_heads),
+                    head_dim=max(
+                        1, self.hidden_size // max(self.num_attention_heads, 1)
+                    ),
+                    query_width=self.hidden_size,
+                    key_width=self.hidden_size,
+                    value_width=self.hidden_size,
+                    output_proj_input_width=self.hidden_size,
+                ),
+            )
+        if self.architecture_family.family_label == "unknown_dense":
+            object.__setattr__(
+                self,
+                "architecture_family",
+                ArchitectureFamilySpec(
+                    family_label=f"{self.model_type}_dense",
+                    display_name=self.model_type,
+                ),
+            )
 
     def tokens_per_layer(self, batch_size: int, sequence_length: int) -> int:
         """Return the token count processed by one layer."""
@@ -284,7 +334,27 @@ class EstimatorConfig:
         adapter_optimizer_state_dtype: LoRA optimizer-state dtype.
         use_master_weights: Whether a separate master-weight copy is present.
         lora: Optional LoRA adapter configuration.
-        runtime_floor_gb_override: Optional fixed runtime floor override.
+        runtime_cuda_context_gb: Runtime CUDA-context support assumption.
+        runtime_allocator_pool_gb: Runtime allocator-pool support assumption.
+        runtime_nccl_gb: Runtime NCCL support assumption.
+        runtime_deepspeed_gb: Runtime DeepSpeed support assumption.
+        runtime_support_gb_override: Optional total runtime-support override.
+        ddp_bucket_elements: DDP reducer bucket size in gradient elements.
+        zero_bucket_elements: ZeRO reduce/all-gather bucket size in elements.
+        zero_prefetch_elements: ZeRO prefetch bucket size in elements.
+        zero_tested_optimizer_names: Optimizers treated as ZeRO-tested.
+        zero_untested_optimizer_state_is_sharded: Whether untested optimizer
+            state is assumed sharded in ZeRO.
+        zero_untested_optimizer_replica_tensor_count: Fallback state replica
+            tensor copies for untested ZeRO optimizers.
+        zero_untested_optimizer_replica_dtype: Dtype alias for fallback state
+            replicas.
+        zero_untested_optimizer_update_is_sharded: Whether untested optimizer
+            update scratch is assumed sharded in ZeRO.
+        zero_untested_optimizer_update_replica_tensor_count: Fallback update
+            replica tensor copies for untested ZeRO optimizers.
+        zero_untested_optimizer_update_dtype: Dtype alias for fallback update
+            replicas.
 
     Returns:
         Frozen estimator config with only structural memory inputs.
@@ -315,9 +385,57 @@ class EstimatorConfig:
     adapter_weight_dtype: str = "fp32"
     adapter_grad_dtype: str = "fp32"
     adapter_optimizer_state_dtype: str = "fp32"
+    runtime_cuda_context_gb: float = 0.25
+    runtime_allocator_pool_gb: float = 0.05
+    runtime_nccl_gb: float = 0.0
+    runtime_deepspeed_gb: float = 0.0
+    runtime_support_gb_override: float | None = None
+    ddp_bucket_elements: int = 268_435_456
+    zero_bucket_elements: int = 500_000_000
+    zero_prefetch_elements: int = 50_000_000
+    loss_output_dtype: str = "fp32"
+    loss_output_logits_fraction: float = 1.0
+    single_lora_flash2_backward_logits_fraction: float = 0.5
+    single_lora_sdpa_saved_input_overlap_fraction: float = 1.0
+    single_lora_sdpa_saved_input_overlap_min_hidden_size: int = 4096
+    single_lora_sdpa_saved_input_overlap_min_layers: int = 40
+    zero2_lora_backward_activation_fraction: float = 1.0 / 6.0
+    zero3_lora_backward_activation_fraction: float = 1.0 / 6.0
     use_master_weights: bool = False
     lora: LoRAConfig | None = None
-    runtime_floor_gb_override: float | None = None
+    persistent_backend_buffer_tensor_count: float | None = None
+    persistent_backend_buffer_dtype: str = "weight_dtype"
+    zero_tested_optimizer_names: tuple[str, ...] = ("adam", "adamw")
+    zero_untested_optimizer_state_is_sharded: bool = False
+    zero_untested_optimizer_replica_tensor_count: float = 1.0
+    zero_untested_optimizer_replica_dtype: str = "weight_dtype"
+    zero_untested_optimizer_update_is_sharded: bool = False
+    zero_untested_optimizer_update_replica_tensor_count: float = 1.0
+    zero_untested_optimizer_update_dtype: str = "weight_dtype"
+
+    def _resolve_configured_dtype(self, dtype_name: str) -> str:
+        """Resolve one configured dtype alias against estimator dtypes."""
+
+        normalized_name = dtype_name.lower()
+        if normalized_name == "auto":
+            return self.weight_dtype
+        if normalized_name == "weight_dtype":
+            return self.weight_dtype
+        if normalized_name == "grad_dtype":
+            return self.grad_dtype
+        if normalized_name == "master_weight_dtype":
+            return self.master_weight_dtype
+        if normalized_name == "optimizer_state_dtype":
+            if self.optimizer_state_dtype != "auto":
+                return self.optimizer_state_dtype
+            return self.weight_dtype
+        if normalized_name == "adapter_weight_dtype":
+            return self.adapter_parameter_dtype()
+        if normalized_name == "adapter_grad_dtype":
+            return self.adapter_gradient_dtype()
+        if normalized_name in {"adapter_state_dtype", "adapter_optimizer_state_dtype"}:
+            return self.adapter_state_dtype()
+        return dtype_name
 
     def available_gpu_count(self) -> int:
         """Return the number of GPUs available to the strategy search."""
@@ -367,6 +485,14 @@ class EstimatorConfig:
 
         return self.attention_backend.lower()
 
+    def normalized_zero_tested_optimizer_names(self) -> tuple[str, ...]:
+        """Return normalized ZeRO-tested optimizer names."""
+
+        return tuple(
+            optimizer_name.lower()
+            for optimizer_name in self.zero_tested_optimizer_names
+        )
+
     def adapter_parameter_dtype(self) -> str:
         """Return the dtype used for LoRA adapter parameters."""
 
@@ -382,6 +508,103 @@ class EstimatorConfig:
 
         return self.adapter_optimizer_state_dtype
 
+    def loss_output_resolved_dtype(self) -> str:
+        """Return the dtype used for persistent loss/logit outputs."""
+
+        return self._resolve_configured_dtype(self.loss_output_dtype)
+
+    def resolved_runtime_nccl_gb(self) -> float:
+        """Return NCCL runtime support in GiB.
+
+        Returns:
+            Explicit NCCL support when configured, otherwise the default
+            distributed-runtime assumption for the selected mode.
+        """
+
+        if self.runtime_nccl_gb > 0.0:
+            return self.runtime_nccl_gb
+        if self.distributed_mode == "single_gpu":
+            return 0.0
+        return 0.30
+
+    def resolved_runtime_deepspeed_gb(self) -> float:
+        """Return DeepSpeed runtime support in GiB.
+
+        Returns:
+            Explicit DeepSpeed support when configured, otherwise the default
+            ZeRO-runtime assumption for the selected mode.
+        """
+
+        if self.runtime_deepspeed_gb > 0.0:
+            return self.runtime_deepspeed_gb
+        if self.distributed_mode == "zero2":
+            return 0.20
+        if self.distributed_mode == "zero3":
+            return 0.40
+        return 0.0
+
+    def runtime_support_gb(self) -> float:
+        """Return total runtime support in GiB.
+
+        Returns:
+            Configured total runtime support, or the sum of named runtime
+            support components when no total override is present.
+        """
+
+        if self.runtime_support_gb_override is not None:
+            return self.runtime_support_gb_override
+        return (
+            self.runtime_cuda_context_gb
+            + self.runtime_allocator_pool_gb
+            + self.resolved_runtime_nccl_gb()
+            + self.resolved_runtime_deepspeed_gb()
+        )
+
+    def persistent_backend_buffer_resolved_dtype(self) -> str:
+        """Return the dtype used for persistent backend support buffers."""
+
+        return self._resolve_configured_dtype(self.persistent_backend_buffer_dtype)
+
+    def persistent_backend_buffer_count(self) -> float:
+        """Return persistent backend-buffer copies in trainable-tensor units."""
+
+        if self.persistent_backend_buffer_tensor_count is not None:
+            return self.persistent_backend_buffer_tensor_count
+        optimizer_name = self.optimizer_name.lower()
+        if self.distributed_mode == "ddp" and self.tuning_mode == "full_ft":
+            return 1.0
+        if not self.is_zero_mode() or self.tuning_mode != "full_ft":
+            return 0.0
+        if optimizer_name == "adagrad":
+            return 2.0
+        return 1.0
+
+    def sharded_lora_backward_activation_fraction(self) -> float:
+        """Return backward-visible retention for checkpointed ZeRO LoRA.
+
+        Returns:
+            Fraction of sharded LoRA visible propagation that survives into the
+            backward peak after checkpoint rematerialization.
+        """
+
+        if self.tuning_mode != "lora" or not self.is_zero_mode():
+            return 0.0
+        if self.distributed_mode == "zero3":
+            return self.zero3_lora_backward_activation_fraction
+        return 0.0
+
+    def zero_untested_replica_dtype(self) -> str:
+        """Return the fallback dtype used for ZeRO untested state replicas."""
+
+        return self._resolve_configured_dtype(
+            self.zero_untested_optimizer_replica_dtype
+        )
+
+    def zero_untested_update_dtype(self) -> str:
+        """Return the fallback dtype used for ZeRO untested update replicas."""
+
+        return self._resolve_configured_dtype(self.zero_untested_optimizer_update_dtype)
+
 
 @dataclass(frozen=True)
 class ResidentStateDebug:
@@ -391,7 +614,8 @@ class ResidentStateDebug:
     gradient_bytes: int
     optimizer_state_bytes: int
     master_weight_bytes: int
-    runtime_floor_bytes: int
+    runtime_support_bytes: int
+    persistent_backend_buffer_bytes: int
     trainable_parameter_bytes: int
 
 
@@ -399,16 +623,30 @@ class ResidentStateDebug:
 class ActivationDebug:
     """Retained activation objects used by the analytical estimator."""
 
+    base_hook_visible_activation_bytes: int
+    visible_propagation_bytes: int
+    checkpoint_resident_block_input_bytes: int
     saved_linear_input_bytes: int
+    saved_input_overlap_bytes: int
+    mlp_intermediate_bytes: int
+    parameter_gradient_context_bytes: int
     residual_norm_bytes: int
     checkpoint_boundary_bytes: int
     attention_saved_bytes: int
     loss_state_bytes: int
     lora_low_rank_bytes: int
+    lora_backward_logits_context_bytes: int
     expanded_query_saved_bytes: int
+    query_output_context_bytes: int
+    key_output_context_bytes: int
+    value_output_context_bytes: int
+    output_proj_input_context_bytes: int
+    output_proj_output_context_bytes: int
+    retained_forward_proxy_bytes: int
     forward_phase_activation_bytes: int
     backward_phase_activation_bytes: int
     hook_visible_activation_bytes: int
+    checkpointed_sharded_lora_backward_visible_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -422,6 +660,9 @@ class WorkspaceDebug:
     optimizer_update_workspace_bytes: int
     ddp_reducer_bucket_bytes: int
     ddp_comm_overlap_bytes: int
+    zero_allgather_bucket_bytes: int
+    zero_reduce_bucket_bytes: int
+    zero_prefetch_bucket_bytes: int
     zero_fetch_window_bytes: int
     zero_update_window_bytes: int
     zero_comm_window_bytes: int
@@ -453,22 +694,61 @@ class EstimatorDebugInfo:
     phase_peaks: PhasePeakDebug
 
     def flat_numeric_metadata(self) -> dict[str, int | str]:
-        """Return a flat metadata mapping for legacy comparison/reporting paths."""
+        """Return a flat metadata mapping for comparison and reporting."""
 
         return {
             "parameter_bytes": self.resident_state.parameter_bytes,
             "gradient_bytes": self.resident_state.gradient_bytes,
             "optimizer_state_bytes": self.resident_state.optimizer_state_bytes,
             "master_weight_bytes": self.resident_state.master_weight_bytes,
-            "runtime_floor_bytes": self.resident_state.runtime_floor_bytes,
+            "runtime_support_bytes": self.resident_state.runtime_support_bytes,
+            "persistent_backend_buffer_bytes": (
+                self.resident_state.persistent_backend_buffer_bytes
+            ),
             "trainable_parameter_bytes": self.resident_state.trainable_parameter_bytes,
+            "base_hook_visible_activation_bytes": (
+                self.activations.base_hook_visible_activation_bytes
+            ),
+            "visible_propagation_bytes": (
+                self.activations.visible_propagation_bytes
+            ),
+            "checkpoint_resident_block_input_bytes": (
+                self.activations.checkpoint_resident_block_input_bytes
+            ),
             "saved_linear_input_bytes": self.activations.saved_linear_input_bytes,
+            "saved_input_overlap_bytes": self.activations.saved_input_overlap_bytes,
+            "mlp_intermediate_bytes": self.activations.mlp_intermediate_bytes,
+            "parameter_gradient_context_bytes": (
+                self.activations.parameter_gradient_context_bytes
+            ),
             "residual_norm_bytes": self.activations.residual_norm_bytes,
             "checkpoint_boundary_bytes": self.activations.checkpoint_boundary_bytes,
             "attention_saved_bytes": self.activations.attention_saved_bytes,
             "loss_state_bytes": self.activations.loss_state_bytes,
             "lora_low_rank_bytes": self.activations.lora_low_rank_bytes,
+            "lora_backward_logits_context_bytes": (
+                self.activations.lora_backward_logits_context_bytes
+            ),
             "expanded_query_saved_bytes": self.activations.expanded_query_saved_bytes,
+            "query_output_context_bytes": (
+                self.activations.query_output_context_bytes
+            ),
+            "key_output_context_bytes": self.activations.key_output_context_bytes,
+            "value_output_context_bytes": (
+                self.activations.value_output_context_bytes
+            ),
+            "output_proj_input_context_bytes": (
+                self.activations.output_proj_input_context_bytes
+            ),
+            "output_proj_output_context_bytes": (
+                self.activations.output_proj_output_context_bytes
+            ),
+            "checkpointed_sharded_lora_backward_visible_bytes": (
+                self.activations.checkpointed_sharded_lora_backward_visible_bytes
+            ),
+            "retained_forward_proxy_bytes": (
+                self.activations.retained_forward_proxy_bytes
+            ),
             "forward_phase_activation_bytes": (
                 self.activations.forward_phase_activation_bytes
             ),
@@ -491,6 +771,11 @@ class EstimatorDebugInfo:
             ),
             "ddp_reducer_bucket_bytes": self.workspace.ddp_reducer_bucket_bytes,
             "ddp_comm_overlap_bytes": self.workspace.ddp_comm_overlap_bytes,
+            "zero_allgather_bucket_bytes": (
+                self.workspace.zero_allgather_bucket_bytes
+            ),
+            "zero_reduce_bucket_bytes": self.workspace.zero_reduce_bucket_bytes,
+            "zero_prefetch_bucket_bytes": self.workspace.zero_prefetch_bucket_bytes,
             "zero_fetch_window_bytes": self.workspace.zero_fetch_window_bytes,
             "zero_update_window_bytes": self.workspace.zero_update_window_bytes,
             "zero_comm_window_bytes": self.workspace.zero_comm_window_bytes,
@@ -602,24 +887,6 @@ class TrainingConfig:
     nonstandard_attention_workspace_factor: float = 0.0
     standard_attention_activation_factor: float = 1.0
     nonstandard_attention_activation_factor: float = 1.0
-    forward_autograd_query_context_copies: float = 1.0
-    forward_autograd_key_context_copies: float = 1.0
-    forward_autograd_hidden_context_copies: float = 6.0
-    forward_autograd_expanded_query_context_copies: float = 1.0
-    forward_autograd_expanded_key_context_copies: float = 1.0
-    forward_autograd_expanded_value_context_copies: float = 1.0
-    forward_autograd_expanded_output_input_context_copies: float = 1.0
-    forward_autograd_expanded_output_output_context_copies: float = 1.0
-    forward_autograd_expanded_hidden_context_copies: float = 3.0
-    full_ft_forward_autograd_context_resident_fraction: float = 1.0
-    single_full_forward_autograd_context_resident_fraction: float = 0.0
-    ddp_full_forward_autograd_context_resident_fraction: float = 0.0
-    zero2_full_forward_autograd_context_resident_fraction: float = 1.0
-    zero3_full_forward_autograd_context_resident_fraction: float = 1.0
-    lora_forward_autograd_context_resident_fraction: float = 0.0
-    gradient_checkpointing_activation_factor: float = 1.0
-    gradient_checkpointing_forward_workspace_factor: float = 1.0
-    gradient_checkpointing_backward_workspace_factor: float = 1.0
     forward_to_loss_reserved_carryover_fraction: float = 1.0
     loss_to_backward_reserved_carryover_fraction: float = 1.0
     backward_to_optimizer_reserved_carryover_fraction: float = 1.0
@@ -647,10 +914,15 @@ class TrainingConfig:
     persistent_backend_buffer_dtype: str = "weight_dtype"
     persistent_backend_buffer_backward_overlap_fraction: float = 1.0
     persistent_backend_buffer_optimizer_overlap_fraction: float = 1.0
+    ddp_bucket_elements: int = 268_435_456
     zero_bucket_elements: int = 500_000_000
     zero_prefetch_elements: int = 50_000_000
     loss_output_dtype: str = "fp32"
     loss_output_logits_fraction: float = 1.0
+    single_lora_flash2_backward_logits_fraction: float = 0.5
+    single_lora_sdpa_saved_input_overlap_fraction: float = 1.0
+    single_lora_sdpa_saved_input_overlap_min_hidden_size: int = 4096
+    single_lora_sdpa_saved_input_overlap_min_layers: int = 40
     single_full_forward_logits_copies: float = 2.0
     single_lora_forward_logits_fraction: float = 0.5
     ddp_full_forward_logits_copies: float = 2.0
@@ -866,6 +1138,53 @@ class TrainingConfig:
 
         return self._resolve_configured_dtype(self.persistent_backend_buffer_dtype)
 
+    def resolved_runtime_nccl_gb(self) -> float:
+        """Return NCCL runtime support in GiB.
+
+        Returns:
+            Explicit NCCL support when configured, otherwise the default
+            distributed-runtime assumption for the selected mode.
+        """
+
+        if self.runtime_nccl_gb > 0.0:
+            return self.runtime_nccl_gb
+        if self.distributed_mode == "single_gpu":
+            return 0.0
+        return 0.30
+
+    def resolved_runtime_deepspeed_gb(self) -> float:
+        """Return DeepSpeed runtime support in GiB.
+
+        Returns:
+            Explicit DeepSpeed support when configured, otherwise the default
+            ZeRO-runtime assumption for the selected mode.
+        """
+
+        if self.runtime_deepspeed_gb > 0.0:
+            return self.runtime_deepspeed_gb
+        if self.distributed_mode == "zero2":
+            return 0.20
+        if self.distributed_mode == "zero3":
+            return 0.40
+        return 0.0
+
+    def runtime_support_gb(self) -> float:
+        """Return total runtime support in GiB.
+
+        Returns:
+            Explicit reserved support when configured, otherwise the sum of
+            named runtime support components.
+        """
+
+        if self.reserved_vram_gb_per_gpu is not None:
+            return self.reserved_vram_gb_per_gpu
+        return (
+            self.runtime_cuda_context_gb
+            + self.runtime_allocator_pool_gb
+            + self.resolved_runtime_nccl_gb()
+            + self.resolved_runtime_deepspeed_gb()
+        )
+
     def persistent_backend_buffer_count(self) -> float:
         """Return the number of trainable-sized backend buffers held persistently.
 
@@ -895,20 +1214,19 @@ class TrainingConfig:
             return self.zero3_lora_visible_activation_extra_fraction
         return 0.0
 
-    def retained_forward_autograd_context_fraction(self) -> float:
-        """Return the resident fraction of hidden forward autograd context."""
+    def sharded_lora_backward_activation_fraction(self) -> float:
+        """Return backward-visible retention for checkpointed ZeRO LoRA.
 
-        if self.tuning_mode == "lora":
-            return self.lora_forward_autograd_context_resident_fraction
-        if self.distributed_mode == "single_gpu":
-            return self.single_full_forward_autograd_context_resident_fraction
-        if self.distributed_mode == "ddp":
-            return self.ddp_full_forward_autograd_context_resident_fraction
-        if self.distributed_mode == "zero2":
-            return self.zero2_full_forward_autograd_context_resident_fraction
+        Returns:
+            Fraction of sharded LoRA visible propagation that survives into the
+            backward peak after checkpoint rematerialization.
+        """
+
+        if self.tuning_mode != "lora" or not self.is_zero_mode():
+            return 0.0
         if self.distributed_mode == "zero3":
-            return self.zero3_full_forward_autograd_context_resident_fraction
-        return self.full_ft_forward_autograd_context_resident_fraction
+            return self.zero3_lora_backward_activation_fraction
+        return 0.0
 
     def optimizer_reserved_stack_fraction(self) -> float:
         """Return the reserved-pool stacking fraction used at optimizer step."""
@@ -1037,9 +1355,55 @@ class TrainingConfig:
             adapter_weight_dtype=self.adapter_weight_dtype,
             adapter_grad_dtype=self.adapter_grad_dtype,
             adapter_optimizer_state_dtype=self.adapter_optimizer_state_dtype,
+            runtime_support_gb_override=self.reserved_vram_gb_per_gpu,
+            ddp_bucket_elements=self.ddp_bucket_elements,
+            zero_bucket_elements=self.zero_bucket_elements,
+            zero_prefetch_elements=self.zero_prefetch_elements,
+            loss_output_dtype=self.loss_output_dtype,
+            loss_output_logits_fraction=self.loss_output_logits_fraction,
+            single_lora_flash2_backward_logits_fraction=(
+                self.single_lora_flash2_backward_logits_fraction
+            ),
+            single_lora_sdpa_saved_input_overlap_fraction=(
+                self.single_lora_sdpa_saved_input_overlap_fraction
+            ),
+            single_lora_sdpa_saved_input_overlap_min_hidden_size=(
+                self.single_lora_sdpa_saved_input_overlap_min_hidden_size
+            ),
+            single_lora_sdpa_saved_input_overlap_min_layers=(
+                self.single_lora_sdpa_saved_input_overlap_min_layers
+            ),
+            zero2_lora_backward_activation_fraction=(
+                self.zero2_lora_backward_activation_fraction
+            ),
+            zero3_lora_backward_activation_fraction=(
+                self.zero3_lora_backward_activation_fraction
+            ),
             use_master_weights=self.use_master_weights,
             lora=self.lora,
-            runtime_floor_gb_override=self.reserved_vram_gb_per_gpu,
+            persistent_backend_buffer_tensor_count=(
+                self.persistent_backend_buffer_tensor_count
+            ),
+            persistent_backend_buffer_dtype=self.persistent_backend_buffer_dtype,
+            zero_tested_optimizer_names=self.zero_tested_optimizer_names,
+            zero_untested_optimizer_state_is_sharded=(
+                self.zero_untested_optimizer_state_is_sharded
+            ),
+            zero_untested_optimizer_replica_tensor_count=(
+                self.zero_untested_optimizer_replica_tensor_count
+            ),
+            zero_untested_optimizer_replica_dtype=(
+                self.zero_untested_optimizer_replica_dtype
+            ),
+            zero_untested_optimizer_update_is_sharded=(
+                self.zero_untested_optimizer_update_is_sharded
+            ),
+            zero_untested_optimizer_update_replica_tensor_count=(
+                self.zero_untested_optimizer_update_replica_tensor_count
+            ),
+            zero_untested_optimizer_update_dtype=(
+                self.zero_untested_optimizer_update_dtype
+            ),
         )
 
 
@@ -1177,9 +1541,18 @@ class ComparisonResult:
         global_peak_error_bytes: Absolute peak-memory error.
         phase_peak_error_bytes: Error by phase name.
         component_error_bytes: Error by component name.
+        phase_aligned_component_error_bytes: Error by component name after
+            projecting the estimate into the measured peak phase. This excludes
+            retained-forward activation proxies, which are reported separately.
+        retained_forward_proxy_error_bytes: Error for the retained-forward
+            activation proxy compared independently from phase-local activation.
         global_peak_relative_error: Relative peak-memory error.
         phase_peak_relative_error: Relative error by phase name.
         component_relative_error: Relative error by component name.
+        phase_aligned_component_relative_error: Relative error by component
+            name after measured-phase projection.
+        retained_forward_proxy_relative_error: Relative error for the
+            retained-forward activation proxy.
         workspace_proxy_error_bytes: Error by workspace-proxy name.
         workspace_proxy_relative_error: Relative error by workspace-proxy name.
         intermediate_term_error_bytes: Error by non-additive metadata term name.
@@ -1200,6 +1573,12 @@ class ComparisonResult:
     phase_peak_relative_error: dict[str, float]
     component_error_bytes: dict[str, int]
     component_relative_error: dict[str, float]
+    phase_aligned_component_error_bytes: dict[str, int] = field(default_factory=dict)
+    phase_aligned_component_relative_error: dict[str, float] = field(
+        default_factory=dict
+    )
+    retained_forward_proxy_error_bytes: int = 0
+    retained_forward_proxy_relative_error: float = 0.0
     workspace_proxy_error_bytes: dict[str, int] = field(default_factory=dict)
     workspace_proxy_relative_error: dict[str, float] = field(default_factory=dict)
     intermediate_term_error_bytes: dict[str, int] = field(default_factory=dict)

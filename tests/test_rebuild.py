@@ -2,12 +2,12 @@
 
 from pathlib import Path
 
-from simplesft.artifacts import (
+from simplesft.results.artifacts import (
     load_memory_result,
     save_benchmark_suite_result,
     save_memory_result,
 )
-from simplesft.rebuild import rebuild_benchmark_suite_from_measurements
+from simplesft.results.rebuild import rebuild_benchmark_suite_from_measurements
 from simplesft.types import (
     BenchmarkCase,
     BenchmarkCaseResult,

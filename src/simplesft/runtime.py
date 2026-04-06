@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import warnings
 from typing import Any
 
 from .constants import model_type_uses_image_text_runtime
@@ -44,10 +45,27 @@ def load_auto_config(
     prepare_transformers_runtime()
     from transformers import AutoConfig
 
-    return AutoConfig.from_pretrained(
-        pretrained_model_name_or_path=model_ref,
-        trust_remote_code=trust_remote_code,
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"`rope_scaling`'s beta_fast field must be a float, got .*",
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"`rope_scaling`'s beta_slow field must be a float, got .*",
+        )
+        config = AutoConfig.from_pretrained(
+            pretrained_model_name_or_path=model_ref,
+            trust_remote_code=trust_remote_code,
+        )
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if isinstance(rope_scaling, dict):
+        normalized_rope_scaling = dict(rope_scaling)
+        for key in ("beta_fast", "beta_slow"):
+            if key in normalized_rope_scaling:
+                normalized_rope_scaling[key] = float(normalized_rope_scaling[key])
+        setattr(config, "rope_scaling", normalized_rope_scaling)
+    return config
 
 
 def _model_auto_class(*, model_type: str) -> Any:
@@ -120,10 +138,15 @@ def load_pretrained_model(
     """
 
     prepare_transformers_runtime()
+    config = load_auto_config(model_ref=model_ref, trust_remote_code=trust_remote_code)
+    assert (
+        config.model_type == model_type
+    ), f"Resolved config model type `{config.model_type}` does not match `{model_type}`."
     auto_model_class = _model_auto_class(model_type=model_type)
 
     load_kwargs: dict[str, Any] = dict(
         pretrained_model_name_or_path=model_ref,
+        config=config,
         dtype=torch_dtype,
         low_cpu_mem_usage=low_cpu_mem_usage,
         trust_remote_code=trust_remote_code,
@@ -171,7 +194,9 @@ def resolve_attention_implementation(*, attention_backend: str) -> str | None:
     """
 
     normalized_backend = attention_backend.lower()
-    if normalized_backend in {"standard", "auto"}:
+    if normalized_backend == "standard":
+        return "eager"
+    if normalized_backend == "auto":
         return None
     if normalized_backend == "eager":
         return "eager"

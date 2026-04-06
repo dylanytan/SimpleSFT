@@ -1,0 +1,138 @@
+\section{What This Report Is Trying To Do}
+This report explains the memory estimator that is currently implemented in
+SimpleSFT. It is not a historical survey and it is not a proposal for a future
+model. The goal is practical:
+
+\begin{quote}
+Given a model and a training configuration, estimate the peak GPU memory used
+by one rank during one training step.
+\end{quote}
+
+The estimator is easiest to understand if you stop thinking about ``VRAM'' as
+one giant blob. The code does not predict one opaque number. It builds memory
+from a small set of named objects, then asks which training phase is worst.
+
+\section{The One-Step Mental Model}
+For memory purposes, one training step has three moments that matter:
+\begin{enumerate}[leftmargin=1.5em]
+\item \textbf{Forward:} parameters are resident, some activations are kept for
+backward, and kernels use temporary workspace.
+\item \textbf{Backward:} gradients now exist, some forward state is still
+alive, and backward kernels need their own workspace.
+\item \textbf{Optimizer step:} gradients and optimizer state remain live while
+the optimizer fetches parameters, updates them, and communicates with other
+ranks if training is distributed.
+\end{enumerate}
+
+The estimator assigns one candidate peak to each of those moments and then
+takes the maximum:
+\[
+M_{\mathrm{peak}} =
+\max\!\left(
+M_{\mathrm{forward}},
+M_{\mathrm{backward}},
+M_{\mathrm{optimizer}}
+\right).
+\]
+
+That is the whole top-level idea. Everything else in this report explains where
+those three candidate peaks come from.
+
+\section{The Four Memory Families}
+Almost every estimator choice fits into one of four buckets:
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{Resident state:} memory that simply exists on the rank, such as
+parameters, gradients, optimizer state, master weights, and fixed backend
+support buffers.
+\item \textbf{Retained activations:} forward-pass tensors that are intentionally
+kept alive because backward still needs them.
+\item \textbf{Workspace:} temporary memory that spikes while a phase is
+actively running.
+\item \textbf{Carryover:} state that is not part of the clean resident floor
+but is still hanging around when the optimizer step begins.
+\end{itemize}
+
+This decomposition matters because different training regimes move memory
+between these buckets. Checkpointing, for example, reduces retained activation
+state but usually increases backward-time recompute workspace. ZeRO changes the
+resident state and the optimizer-step windows without changing the model's
+architecture. LoRA changes which parameters and linears are actually trainable.
+
+\section{Why The Estimator Works Per Rank}
+The estimator always answers a per-rank question. That is the right unit for
+real training failures because OOM happens on a device, not on the cluster in
+the abstract.
+
+Two consequences follow immediately:
+\begin{itemize}[leftmargin=1.5em]
+\item Tensor parallelism changes the local width of many tensors.
+\item Data parallel sharding changes how much of a resident or optimizer object
+one rank owns.
+\end{itemize}
+
+So two jobs with the same model and sequence length can have very different
+per-rank peaks if they use different world sizes, tensor-parallel degrees, or
+ZeRO stages.
+
+\section{What The Estimator Takes As Input}
+The estimator combines two inputs:
+\begin{itemize}[leftmargin=1.5em]
+\item an \texttt{EstimatorConfig}, which describes how training is being run,
+\item a \texttt{ModelSpec}, which describes the model's size and inspected
+layer structure.
+\end{itemize}
+
+\paragraph{The configuration tells us.}
+\begin{itemize}[leftmargin=1.5em]
+\item whether we are doing full fine-tuning or LoRA,
+\item whether training is single-GPU, DDP, ZeRO-2, or ZeRO-3,
+\item which optimizer family is used,
+\item which attention backend is active,
+\item whether checkpointing is enabled,
+\item the world-size, tensor-parallel, and sequence-parallel choices,
+\item micro-batch size, sequence length, and dtypes,
+\item explicit runtime support assumptions and distributed bucket sizes.
+\end{itemize}
+
+\paragraph{The model spec tells us.}
+\begin{itemize}[leftmargin=1.5em]
+\item the total parameterization,
+\item hidden, intermediate, and vocabulary sizes,
+\item attention widths and head counts,
+\item which linears are trainable,
+\item and, when available, explicit parameter metadata for more exact tensor
+accounting.
+\end{itemize}
+
+\section{A Small Notation Guide}
+Only a few symbols matter for the rest of the report:
+\begin{itemize}[leftmargin=1.5em]
+\item $L$: number of transformer layers.
+\item $H$: hidden size.
+\item $I$: intermediate size.
+\item $V$: vocabulary size.
+\item $B$: micro-batch size per rank.
+\item $S$: sequence length.
+\item $T = B \cdot S$: tokens processed by one rank before any sequence
+parallel split.
+\item $T_{\mathrm{TP}}$: tensor-parallel degree.
+\item $D_{\mathrm{P}}$: data-parallel degree.
+\end{itemize}
+
+When the report refers to a byte width such as $b_w$ or $b_g$, it simply means
+``bytes per element for that dtype.'' For example, bf16 weights imply
+$b_w = 2$.
+
+\section{How To Read The Rest}
+The remainder of the report follows the same order as the estimator itself:
+\begin{enumerate}[leftmargin=1.5em]
+\item build the resident memory floor,
+\item add the retained activations that survive the forward pass,
+\item add the phase-local workspace,
+\item assemble the forward, backward, and optimizer-step candidates,
+\item pick the largest one.
+\end{enumerate}
+
+Whenever a term is derived directly from concrete tensors, the report says so.
+Whenever a term is really a runtime or backend assumption, the report says that
+too. That distinction is important. It keeps the model honest.

@@ -14,3 +14,5 @@ estimator_report/*.fls
 estimator_report/*.log
 estimator_report/*.out
 estimator_report/*.pdf
+estimator_report/*.synctex.gz
+estimator_report/generated/

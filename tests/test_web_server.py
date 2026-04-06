@@ -10,7 +10,7 @@ from typing import Iterator
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-from simplesft.estimate import estimate_peak_memory
+from simplesft.estimator.estimate import estimate_peak_memory
 from simplesft.types import (
     EstimatorConfig,
     MemoryComponentBreakdown,
@@ -18,7 +18,7 @@ from simplesft.types import (
     ModelLinearLayerSpec,
     ModelSpec,
 )
-from simplesft.web_server import (
+from simplesft.web.server import (
     _estimated_training_slowdown_fraction,
     _strategy_score,
     _create_or_reuse_server,
@@ -155,6 +155,7 @@ def test_web_server_serves_html_and_estimate_json() -> None:
         assert "Memory estimate workbench" in html
         assert "Memory Composition" in html
         assert "Candidate Strategies" in html
+        assert "Model Architecture" in html
         assert "Est. slowdown" in html
         assert "Data parallel" in html
         assert "Fixed / Peak / Free" in html
@@ -163,6 +164,8 @@ def test_web_server_serves_html_and_estimate_json() -> None:
         assert "bar-marker gpu" in html
         assert "Overhead" in html
         assert 'id="model_select"' in html
+        assert '<optgroup label="Qwen">' in html
+        assert '<optgroup label="microsoft">' in html
         assert 'id="lora_target_modules"' in html
         assert 'id="tensor_parallel_degree"' in html
         assert 'id="sequence_parallel"' in html
@@ -186,10 +189,19 @@ def test_web_server_serves_html_and_estimate_json() -> None:
         payload = json.loads(urlopen(request).read().decode("utf-8"))
         assert payload["model_spec"]["model_name"] == "toy"
         assert payload["estimate"]["mode"] == "estimate"
+        assert payload["support_status"] == "officially supported"
+        assert payload["catalog_status"] == "custom model path"
         assert payload["recommendation"]["strategy_source"] == "recommended"
         assert payload["estimate"]["config"]["distributed_mode"] == "single_gpu"
         assert payload["estimate"]["config"]["tensor_parallel_degree"] >= 1
         assert payload["estimate"]["metadata"]["data_parallel_degree"] >= 1
+        assert (
+            payload["model_spec"]["architecture_family"]["family_label"]
+            == "llama_dense"
+        )
+        assert payload["model_spec"]["tensor_layout_summary"] == (
+            "col(qkv/up) · row(o/down) · vocab(embed/lm_head)"
+        )
         assert (
             payload["recommendation"]["candidates"][0]["estimated_slowdown_percent"]
             >= 0.0

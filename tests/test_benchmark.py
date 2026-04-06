@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from simplesft.benchmark import build_default_benchmark_cases, run_benchmark_suite
+from simplesft.results.benchmark import build_default_benchmark_cases, run_benchmark_suite
 from simplesft.types import ModelSpec
 
 

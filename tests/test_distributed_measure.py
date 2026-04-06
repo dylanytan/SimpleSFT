@@ -2,9 +2,9 @@
 
 import pytest
 
-import simplesft.distributed_measure as distributed_measure_module
-import simplesft.measure as measure_module
-from simplesft.measure import aggregate_rank_results, measure_peak_memory
+import simplesft.measurement.distributed as distributed_measure_module
+import simplesft.measurement.measure as measure_module
+from simplesft.measurement.measure import aggregate_rank_results, measure_peak_memory
 from simplesft.types import (
     MemoryComponentBreakdown,
     MemoryResult,

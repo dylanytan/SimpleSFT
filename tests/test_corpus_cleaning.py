@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from simplesft.artifacts import (
+from simplesft.results.artifacts import (
     save_benchmark_suite_result,
     save_comparison_result,
     save_memory_result,
 )
-from simplesft.compare import compare_measurement_to_estimate
-from simplesft.corpus_cleaning import clean_measurement_corpus
+from simplesft.results.compare import compare_measurement_to_estimate
+from simplesft.results.corpus_cleaning import clean_measurement_corpus
 from simplesft.types import (
     BenchmarkCase,
     BenchmarkCaseResult,
@@ -45,6 +45,8 @@ def _memory_result(
     peak_gib: float,
     config: TrainingConfig,
     mode: str,
+    model_name: str = "toy",
+    metadata: dict[str, object] | None = None,
 ) -> MemoryResult:
     """Return a compact memory result with one peak phase record."""
 
@@ -60,13 +62,14 @@ def _memory_result(
     )
     return MemoryResult(
         mode=mode,
-        model_name="toy",
+        model_name=model_name,
         config=config,
         breakdown=MemoryComponentBreakdown(parameter_bytes=peak_bytes),
         phase_records=(record,),
         peak_phase="forward",
         global_peak_bytes=peak_bytes,
         feasible=True,
+        metadata={} if metadata is None else metadata,
     )
 
 
@@ -76,17 +79,32 @@ def _write_suite_case(
     artifact_dir: str,
     case_name: str,
     peak_gib: float,
+    gradient_checkpointing: bool = False,
+    attention_backend: str = "sdpa",
+    runtime_attention_implementation: str | None = None,
 ) -> None:
     """Write one measured suite case into a temporary artifact tree."""
 
     config = TrainingConfig(
         tuning_mode="full_ft",
         distributed_mode="single_gpu",
+        attention_backend=attention_backend,
         max_seq_len=128,
         gpu_memory_gb=40.0,
+        gradient_checkpointing=gradient_checkpointing,
     )
     estimate = _memory_result(peak_gib=peak_gib + 1.0, config=config, mode="estimate")
-    measure = _memory_result(peak_gib=peak_gib, config=config, mode="measure")
+    measurement_metadata: dict[str, object] = {}
+    if runtime_attention_implementation is not None:
+        measurement_metadata["runtime_attention_implementation"] = (
+            runtime_attention_implementation
+        )
+    measure = _memory_result(
+        peak_gib=peak_gib,
+        config=config,
+        mode="measure",
+        metadata=measurement_metadata,
+    )
     comparison = compare_measurement_to_estimate(
         measured=measure,
         estimated=estimate,
@@ -119,6 +137,48 @@ def _write_suite_case(
     )
 
 
+def _write_standalone_measurement_case(
+    *,
+    root_dir: Path,
+    artifact_dir: str,
+    peak_gib: float,
+    distributed_mode: str,
+    model_name: str = "Qwen/Qwen2.5-7B-Instruct",
+    attention_backend: str = "sdpa",
+    runtime_attention_implementation: str = "sdpa",
+) -> None:
+    """Write one standalone measurement artifact without suite metadata.
+
+    Args:
+        root_dir: Temporary artifact root.
+        artifact_dir: Directory relative to the root where measurement lives.
+        peak_gib: Measured global peak in GiB.
+        distributed_mode: Distributed backend recorded in the measurement.
+        model_name: Resolvable model id used for synthetic estimate replay.
+    """
+
+    config = TrainingConfig(
+        tuning_mode="full_ft",
+        distributed_mode=distributed_mode,
+        attention_backend=attention_backend,
+        max_seq_len=128,
+        gpu_memory_gb=40.0,
+        gradient_checkpointing=True,
+        gpus_per_node=2,
+    )
+    measurement = _memory_result(
+        peak_gib=peak_gib,
+        config=config,
+        mode="measure",
+        model_name=model_name,
+        metadata={
+            "runtime_attention_implementation": runtime_attention_implementation,
+        },
+    )
+    measurement_path = root_dir / artifact_dir / "measurement.json"
+    save_memory_result(result=measurement, path=measurement_path)
+
+
 def test_clean_measurement_corpus_dedupes_and_keeps_latest(tmp_path: Path) -> None:
     """Cleaner should keep one canonical row and preserve duplicate history."""
 
@@ -149,34 +209,169 @@ def test_clean_measurement_corpus_dedupes_and_keeps_latest(tmp_path: Path) -> No
     assert "0.5" in canonical_csv
 
 
-def test_clean_measurement_corpus_normalizes_report_only_oom_rows(
-    tmp_path: Path,
-) -> None:
-    """Cleaner should normalize report-only markdown tables into CSV rows."""
+def test_clean_measurement_corpus_excludes_checkpointed_rows(tmp_path: Path) -> None:
+    """Cleaner should drop checkpointed measurements from the corpus."""
 
-    report_dir = tmp_path / "report_only_grid"
-    report_dir.mkdir(parents=True)
-    (report_dir / "report.md").write_text(
-        "\n".join(
-            [
-                "# Report",
-                "",
-                "| Model | Tuning | Mode | Seq | Est GiB | Est Phase | Est Feasible | Status | Meas GiB | Meas Phase | Error GiB |",
-                "| --- | --- | --- | ---: | ---: | --- | --- | --- | ---: | --- | ---: |",
-                "| toy | full_ft | zero3 | 2048 | 12.0 | backward | True | measured | 11.0 | backward | 1.0 |",
-                "| toy | full_ft | zero3 | 4096 | 24.0 | backward | False | oom |  |  |  |",
-            ]
-        ),
-        encoding="utf-8",
+    _write_suite_case(
+        root_dir=tmp_path,
+        artifact_dir="toy_suite_ckpt",
+        case_name="case-ckpt",
+        peak_gib=10.0,
+        gradient_checkpointing=True,
+    )
+    _write_suite_case(
+        root_dir=tmp_path,
+        artifact_dir="toy_suite_nonckpt",
+        case_name="case-nonckpt",
+        peak_gib=10.0,
+        gradient_checkpointing=False,
     )
     result = clean_measurement_corpus(
         root_dir=tmp_path,
         output_dir=tmp_path / "_cleaned",
     )
-    report_csv = (tmp_path / "_cleaned" / "normalized_report_rows.csv").read_text()
-    oom_csv = (tmp_path / "_cleaned" / "normalized_oom_rows.csv").read_text()
-    assert result.report_only_dirs == 1
-    assert result.report_only_rows == 2
-    assert result.report_only_oom_rows == 1
-    assert "report_only_grid" in report_csv
-    assert "oom" in oom_csv
+    canonical_csv = (tmp_path / "_cleaned" / "canonical_measurements.csv").read_text()
+    assert result.canonical_rows == 1
+    assert result.checkpointed_rows_dropped == 1
+    assert result.checkpointed_rows_included == 0
+    assert "toy_suite_nonckpt" in canonical_csv
+    assert "toy_suite_ckpt" not in canonical_csv
+
+
+def test_clean_measurement_corpus_includes_curated_checkpointed_rows(
+    tmp_path: Path,
+) -> None:
+    """Cleaner should keep checkpointed rows from the curated checkpoint batch."""
+
+    _write_suite_case(
+        root_dir=tmp_path,
+        artifact_dir="single_gpu_80gb_ckpt_20260406/toy_suite_ckpt",
+        case_name="case-ckpt",
+        peak_gib=10.0,
+        gradient_checkpointing=True,
+    )
+    _write_suite_case(
+        root_dir=tmp_path,
+        artifact_dir="toy_suite_nonckpt",
+        case_name="case-nonckpt",
+        peak_gib=10.0,
+        gradient_checkpointing=False,
+    )
+    result = clean_measurement_corpus(
+        root_dir=tmp_path,
+        output_dir=tmp_path / "_cleaned",
+    )
+    canonical_csv = (tmp_path / "_cleaned" / "canonical_measurements.csv").read_text()
+    assert result.canonical_rows == 2
+    assert result.checkpointed_rows_dropped == 0
+    assert result.checkpointed_rows_included == 1
+    assert "toy_suite_nonckpt" in canonical_csv
+    assert "toy_suite_ckpt" in canonical_csv
+
+
+def test_clean_measurement_corpus_includes_curated_distributed_checkpoint_rows(
+    tmp_path: Path,
+) -> None:
+    """Cleaner should synthesize rows for curated standalone checkpoint batches."""
+
+    _write_standalone_measurement_case(
+        root_dir=tmp_path,
+        artifact_dir="zero2_h100_ckpt_20260406/toy_suite_zero2_ckpt",
+        peak_gib=10.0,
+        distributed_mode="zero2",
+    )
+    _write_standalone_measurement_case(
+        root_dir=tmp_path,
+        artifact_dir="zero3_h100_ckpt_20260406/toy_suite_zero3_ckpt",
+        peak_gib=11.0,
+        distributed_mode="zero3",
+    )
+    result = clean_measurement_corpus(
+        root_dir=tmp_path,
+        output_dir=tmp_path / "_cleaned",
+    )
+    canonical_csv = (tmp_path / "_cleaned" / "canonical_measurements.csv").read_text()
+    assert result.canonical_rows == 2
+    assert result.checkpointed_rows_dropped == 0
+    assert result.checkpointed_rows_included == 2
+    assert "toy_suite_zero2_ckpt" in canonical_csv
+    assert "toy_suite_zero3_ckpt" in canonical_csv
+    assert (tmp_path / "zero2_h100_ckpt_20260406" / "toy_suite_zero2_ckpt" / "estimate.json").exists()
+    assert (tmp_path / "zero2_h100_ckpt_20260406" / "toy_suite_zero2_ckpt" / "comparison.json").exists()
+
+
+def test_clean_measurement_corpus_normalizes_standard_backend_rows(
+    tmp_path: Path,
+) -> None:
+    """Cleaner should replace legacy `standard` rows with resolved backends."""
+
+    _write_suite_case(
+        root_dir=tmp_path,
+        artifact_dir="toy_suite_runtime_sdpa",
+        case_name="case-a",
+        peak_gib=10.0,
+        attention_backend="standard",
+        runtime_attention_implementation="sdpa",
+    )
+    result = clean_measurement_corpus(
+        root_dir=tmp_path,
+        output_dir=tmp_path / "_cleaned",
+    )
+    canonical_csv = (tmp_path / "_cleaned" / "canonical_measurements.csv").read_text()
+    assert result.canonical_rows == 1
+    assert result.ambiguous_backend_rows_dropped == 0
+    assert ",sdpa," in canonical_csv
+    assert ",standard," not in canonical_csv
+
+
+def test_clean_measurement_corpus_drops_ambiguous_standard_rows(
+    tmp_path: Path,
+) -> None:
+    """Cleaner should drop legacy `standard` rows without runtime metadata."""
+
+    _write_suite_case(
+        root_dir=tmp_path,
+        artifact_dir="toy_suite_ambiguous_standard",
+        case_name="case-a",
+        peak_gib=10.0,
+        attention_backend="standard",
+    )
+    result = clean_measurement_corpus(
+        root_dir=tmp_path,
+        output_dir=tmp_path / "_cleaned",
+    )
+    canonical_csv = (tmp_path / "_cleaned" / "canonical_measurements.csv").read_text()
+    assert result.canonical_rows == 0
+    assert result.ambiguous_backend_rows_dropped == 1
+    assert canonical_csv == ""
+
+
+def test_clean_measurement_corpus_removes_stale_legacy_outputs(
+    tmp_path: Path,
+) -> None:
+    """Cleaner should delete old report-only outputs from prior builds."""
+
+    cleaned_dir = tmp_path / "_cleaned"
+    cleaned_dir.mkdir()
+    for filename in (
+        "report_only_artifacts.csv",
+        "normalized_report_rows.csv",
+        "normalized_oom_rows.csv",
+    ):
+        (cleaned_dir / filename).write_text("stale\n", encoding="utf-8")
+    _write_suite_case(
+        root_dir=tmp_path,
+        artifact_dir="toy_suite_iter1",
+        case_name="case-a",
+        peak_gib=10.0,
+    )
+    clean_measurement_corpus(
+        root_dir=tmp_path,
+        output_dir=cleaned_dir,
+    )
+    for filename in (
+        "report_only_artifacts.csv",
+        "normalized_report_rows.csv",
+        "normalized_oom_rows.csv",
+    ):
+        assert not (cleaned_dir / filename).exists()

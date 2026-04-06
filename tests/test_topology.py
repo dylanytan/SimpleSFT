@@ -1,6 +1,6 @@
 """Tests for topology-aware NCCL environment handling."""
 
-import simplesft.topology as topology_module
+import simplesft.measurement.topology as topology_module
 
 
 def test_maybe_apply_cross_numa_nccl_env_sets_nccl_p2p_disable(monkeypatch) -> None:

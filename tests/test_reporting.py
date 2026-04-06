@@ -1,8 +1,8 @@
 """Tests for developer-facing reporting."""
 
-from simplesft.benchmark import build_default_benchmark_cases, run_benchmark_suite
-from simplesft.compare import compare_measurement_to_estimate
-from simplesft.reporting import render_comparison_report, render_suite_report
+from simplesft.results.benchmark import build_default_benchmark_cases, run_benchmark_suite
+from simplesft.results.compare import compare_measurement_to_estimate
+from simplesft.results.reporting import render_comparison_report, render_suite_report
 from simplesft.types import (
     MemoryComponentBreakdown,
     MemoryResult,
