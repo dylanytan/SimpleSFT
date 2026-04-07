@@ -268,12 +268,23 @@ the backward workspace or retained-forward state into the step,
 \item checkpointed full-FT ZeRO paths mainly carry backward activation state,
 \item checkpointed single-GPU LoRA can carry both retained-forward state and
 some backward workspace into the step,
+\item checkpointed distributed LoRA can also carry allocator reserve built up by
+loss materialization and backward recompute, even when the clean resident and
+activation terms look small at optimizer-step entry,
 \item many simpler regimes carry essentially nothing extra.
 \end{itemize}
 
 The estimator keeps this logic as a short regime table in code because the
 lifetimes really are regime-dependent. The important thing is that the report
 states this openly instead of burying it in a single unexplained formula.
+
+The newest example of that is checkpointed distributed LoRA. The current
+heuristic adds the retained-forward proxy, one loss-workspace copy, the
+backward workspace, and the small checkpoint-boundary or saved-input contexts
+that tend to keep allocator reserve warm on long-context DDP and ZeRO runs.
+That term is empirical rather than first-principles allocator simulation, but
+it materially improves replay on the long-context OLMo 3 corpus without
+changing the cleaner resident-state accounting elsewhere.
 
 A compact generic view is:
 \[
@@ -307,6 +318,8 @@ as measured or runtime-driven assumptions:
 not exact allocator traces,
 \item runtime support is a named support model, not a full CUDA allocator
 simulation,
+\item checkpointed distributed LoRA optimizer carryover is still a calibrated
+allocator-lifetime heuristic rather than a full reserve-pool simulator,
 \item one stage-specific ZeRO-2 full-FT lifetime path remains because it still
 improves replay quality materially.
 \end{itemize}

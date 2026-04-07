@@ -337,6 +337,12 @@ forward pass but do need to exist while gradients are being computed. Examples
 include residual or normalization context and some saved-input state that only
 matters once backward begins.
 
+Checkpointed distributed LoRA now uses a deliberately slim backward path. In
+DDP, ZeRO-2, and ZeRO-3, the forward proxy is the checkpoint boundary plus the
+loss-state term and the LoRA low-rank intermediates. Backward then adds only
+the saved linear-input context and the residual or normalization context that
+must become live once gradients are formed.
+
 Viewed proportionally, backward keeps the same forward-retained base and adds a
 smaller extra context term:
 \[
@@ -347,6 +353,12 @@ M_{\mathrm{proxy}}
 \]
 This is why backward often remains larger than forward even after the retained
 proxy has already been counted.
+
+Earlier versions also added an extra ZeRO-3 checkpointed visible-propagation
+slice on top of this path. Long-context OLMo 3 replay showed that this term
+systematically overcounted backward activation state, so the current estimator
+removes that addend and keeps the checkpointed distributed LoRA path aligned to
+named retained objects only.
 
 So the two activation views are:
 \begin{align*}
