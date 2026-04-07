@@ -35,6 +35,63 @@ def prepare_transformers_runtime() -> bool:
     return False
 
 
+def _normalize_rope_scaling_config_dict(*, config_dict: dict[str, Any]) -> dict[str, Any]:
+    """Return a config dict with OLMo rope-scaling numeric fields normalized.
+
+    Args:
+        config_dict: Raw Hugging Face config dictionary.
+
+    Returns:
+        Copy of the config dictionary with float-valued rope scaling fields.
+
+    Example:
+        >>> normalized = _normalize_rope_scaling_config_dict(
+        ...     config_dict={"rope_scaling": {"beta_fast": 32, "beta_slow": 1}}
+        ... )
+        >>> normalized["rope_scaling"]["beta_fast"]
+        32.0
+    """
+
+    normalized_config = dict(config_dict)
+    rope_scaling = normalized_config.get("rope_scaling")
+    if not isinstance(rope_scaling, dict):
+        return normalized_config
+    normalized_rope_scaling = dict(rope_scaling)
+    for key in ("beta_fast", "beta_slow"):
+        if key in normalized_rope_scaling:
+            normalized_rope_scaling[key] = float(normalized_rope_scaling[key])
+    normalized_config["rope_scaling"] = normalized_rope_scaling
+    return normalized_config
+
+
+def _load_config_from_dict(
+    *,
+    model_ref: str,
+    trust_remote_code: bool,
+) -> Any:
+    """Build a config object from a normalized raw config dictionary.
+
+    Args:
+        model_ref: Hugging Face model reference.
+        trust_remote_code: Whether to allow custom remote model code.
+
+    Returns:
+        Instantiated Hugging Face config object.
+    """
+
+    from transformers import AutoConfig, PretrainedConfig
+
+    config_dict, _ = PretrainedConfig.get_config_dict(
+        pretrained_model_name_or_path=model_ref,
+        trust_remote_code=trust_remote_code,
+    )
+    normalized_config = _normalize_rope_scaling_config_dict(config_dict=config_dict)
+    model_type = normalized_config["model_type"]
+    config_kwargs = dict(normalized_config)
+    config_kwargs.pop("model_type", None)
+    return AutoConfig.for_model(model_type, **config_kwargs)
+
+
 def load_auto_config(
     *,
     model_ref: str,
@@ -45,6 +102,13 @@ def load_auto_config(
     prepare_transformers_runtime()
     from transformers import AutoConfig
 
+    try:
+        return _load_config_from_dict(
+            model_ref=model_ref,
+            trust_remote_code=trust_remote_code,
+        )
+    except ValueError:
+        pass
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
@@ -58,12 +122,10 @@ def load_auto_config(
             pretrained_model_name_or_path=model_ref,
             trust_remote_code=trust_remote_code,
         )
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if isinstance(rope_scaling, dict):
-        normalized_rope_scaling = dict(rope_scaling)
-        for key in ("beta_fast", "beta_slow"):
-            if key in normalized_rope_scaling:
-                normalized_rope_scaling[key] = float(normalized_rope_scaling[key])
+    normalized_rope_scaling = _normalize_rope_scaling_config_dict(
+        config_dict={"rope_scaling": getattr(config, "rope_scaling", None)}
+    )["rope_scaling"]
+    if normalized_rope_scaling is not None:
         setattr(config, "rope_scaling", normalized_rope_scaling)
     return config
 

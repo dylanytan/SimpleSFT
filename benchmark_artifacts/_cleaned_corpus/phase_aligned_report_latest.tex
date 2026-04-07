@@ -1,0 +1,38 @@
+\section{Quantitative Accuracy}
+The current canonical replay covers 324 rows and skips 6 rows that still fail for artifact or support reasons.
+
+\begin{align*}
+\text{Global MAE} &= 1.332\ \mathrm{GiB} \\
+\text{Mean Absolute Relative Error} &= 9.1\% \\
+\text{Median Absolute Relative Error} &= 6.1\% \\
+\text{Phase Match Rate} &= 63.6\% \\
+\text{Retained-Forward Proxy MAE} &= 1.101\ \mathrm{GiB}
+\end{align*}
+
+\subsection{Phase Confusion}
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Measured & Estimated & Count \\
+\midrule
+backward & backward & 104 \\
+backward & optimizer\_step & 19 \\
+optimizer\_step & backward & 99 \\
+optimizer\_step & optimizer\_step & 102 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Targeted Slices}
+\begin{center}
+\begin{tabular}{p{2.9in}rrr}
+\toprule
+Slice & Count & Global MAE & Phase Match \\
+\midrule
+Non-Eager Long-Seq Full FT & 12 & 4.408 GiB & 83.3\% \\
+Non-Eager Long-Seq LoRA & 52 & 2.381 GiB & 50.0\% \\
+ZeRO-2 & 111 & 1.390 GiB & 92.8\% \\
+ZeRO-3 & 13 & 3.219 GiB & 38.5\% \\
+\bottomrule
+\end{tabular}
+\end{center}

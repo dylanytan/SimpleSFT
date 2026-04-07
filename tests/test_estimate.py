@@ -829,8 +829,39 @@ def test_checkpointed_single_gpu_lora_keeps_block_input_and_loss_proxy() -> None
     )
 
 
-def test_checkpointed_zero3_lora_uses_boundary_loss_and_visible_fraction() -> None:
-    """Checkpointed ZeRO-3 LoRA should add only the configured backward-visible slice."""
+def test_checkpointed_ddp_lora_uses_boundary_loss_proxy() -> None:
+    """Checkpointed DDP LoRA should keep the distributed boundary-loss proxy."""
+
+    activation_terms = build_activation_terms(
+        model_spec=_precomputed_model_spec(model_id="Qwen/Qwen2.5-7B-Instruct"),
+        config=EstimatorConfig(
+            tuning_mode="lora",
+            distributed_mode="ddp",
+            gpus_per_node=2,
+            attention_backend="sdpa",
+            max_seq_len=4096,
+            gradient_checkpointing=True,
+            lora=LoRAConfig(
+                rank=16,
+                target_modules=("q_proj", "k_proj", "v_proj", "o_proj"),
+            ),
+        ),
+    )
+    assert activation_terms.debug.retained_forward_proxy_bytes == (
+        activation_terms.debug.checkpoint_boundary_bytes
+        + activation_terms.debug.loss_state_bytes
+        + activation_terms.debug.lora_low_rank_bytes
+        + activation_terms.debug.attention_saved_bytes
+    )
+    assert activation_terms.debug.backward_phase_activation_bytes == (
+        activation_terms.debug.retained_forward_proxy_bytes
+        + activation_terms.debug.saved_linear_input_bytes
+        + activation_terms.debug.residual_norm_bytes
+    )
+
+
+def test_checkpointed_zero3_lora_uses_boundary_loss_proxy_without_visible_slice() -> None:
+    """Checkpointed ZeRO-3 LoRA should not add the legacy visible-gap term."""
 
     activation_terms = build_activation_terms(
         model_spec=_precomputed_model_spec(model_id="Qwen/Qwen2.5-7B-Instruct"),
@@ -853,25 +884,14 @@ def test_checkpointed_zero3_lora_uses_boundary_loss_and_visible_fraction() -> No
         + activation_terms.debug.lora_low_rank_bytes
         + activation_terms.debug.attention_saved_bytes
     )
-    expected_backward_visible_bytes = int(
-        round(
-            max(
-                0,
-                activation_terms.debug.visible_propagation_bytes
-                - activation_terms.debug.checkpoint_boundary_bytes,
-            )
-            * (1.0 / 6.0)
-        )
-    )
     assert (
         activation_terms.debug.checkpointed_sharded_lora_backward_visible_bytes
-        == expected_backward_visible_bytes
+        == 0
     )
     assert activation_terms.debug.backward_phase_activation_bytes == (
         activation_terms.debug.retained_forward_proxy_bytes
         + activation_terms.debug.saved_linear_input_bytes
         + activation_terms.debug.residual_norm_bytes
-        + activation_terms.debug.checkpointed_sharded_lora_backward_visible_bytes
     )
     assert activation_terms.debug.retained_forward_proxy_bytes < (
         activation_terms.debug.visible_propagation_bytes
@@ -1630,6 +1650,54 @@ def test_zero2_tested_full_ft_carries_retained_forward_without_loss() -> None:
         retained_forward_without_loss_bytes,
     )
     assert carryover_bytes == expected_carryover_bytes
+
+
+def test_checkpointed_distributed_lora_carries_soft_reserved_stack() -> None:
+    """Checkpointed distributed LoRA should model the long-context reserve stack."""
+
+    model_spec = _precomputed_model_spec(model_id="Qwen/Qwen2.5-7B-Instruct")
+    config = EstimatorConfig(
+        tuning_mode="lora",
+        distributed_mode="zero3",
+        gpus_per_node=2,
+        optimizer_name="adamw",
+        attention_backend="flash2",
+        max_seq_len=4096,
+        gradient_checkpointing=True,
+        lora=LoRAConfig(
+            rank=16,
+            target_modules=("q_proj", "k_proj", "v_proj", "o_proj"),
+        ),
+    )
+    resident_terms = build_resident_state_terms(
+        model_spec=model_spec,
+        config=config,
+    )
+    activation_terms = build_activation_terms(
+        model_spec=model_spec,
+        config=config,
+    )
+    workspace_terms = build_workspace_terms(
+        model_spec=model_spec,
+        config=config,
+        parameter_bytes=resident_terms.debug.parameter_bytes,
+        trainable_parameter_bytes=resident_terms.debug.trainable_parameter_bytes,
+        gradient_bytes=resident_terms.debug.gradient_bytes,
+        optimizer_state_bytes=resident_terms.debug.optimizer_state_bytes,
+    )
+    carryover_bytes = _optimizer_reserved_carryover_bytes(
+        config=config,
+        activation_terms=activation_terms,
+        workspace_terms=workspace_terms,
+    )
+    assert carryover_bytes == (
+        activation_terms.debug.forward_phase_activation_bytes
+        + workspace_terms.debug.loss_workspace_bytes
+        + workspace_terms.backward_workspace_bytes
+        + activation_terms.debug.checkpoint_boundary_bytes
+        + activation_terms.debug.saved_linear_input_bytes
+        + activation_terms.debug.residual_norm_bytes
+    )
 
 
 def test_attention_workspace_is_per_layer_not_full_depth() -> None:

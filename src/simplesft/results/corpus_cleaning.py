@@ -216,6 +216,7 @@ def _is_curated_checkpoint_suite_dir(*, suite_dir: Path) -> bool:
     """
 
     curated_prefixes = (
+        "olmo3_7b_a10080gb_ckpt_flash2_clean_",
         "single_gpu_80gb_ckpt_",
         "zero2_h100_ckpt_",
         "zero3_h100_ckpt_",
@@ -416,7 +417,9 @@ def _iter_suite_rows(
             measured = load_memory_result(path=measurement_path)
             attention_backend = _canonical_attention_backend(
                 requested_backend=measured.config.attention_backend,
-                runtime_backend=measured.metadata.get("runtime_attention_implementation"),
+                runtime_backend=measured.metadata.get(
+                    "runtime_attention_implementation"
+                ),
             )
             if attention_backend is None:
                 ambiguous_backend_rows_dropped += 1
@@ -582,9 +585,7 @@ def clean_measurement_corpus(
         checkpointed_rows_dropped,
         checkpointed_rows_included,
         seen_measurement_paths,
-    ) = (
-        _iter_suite_rows(root_dir=root_path)
-    )
+    ) = _iter_suite_rows(root_dir=root_path)
     (
         standalone_rows,
         standalone_checkpoint_rows,

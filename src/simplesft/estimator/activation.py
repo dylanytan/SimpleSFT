@@ -186,6 +186,28 @@ def _lora_visible_activation_extra_fraction(*, config: ConfigLike) -> float:
     return 0.0
 
 
+def _uses_checkpointed_distributed_lora_proxy(
+    *,
+    config: ConfigLike,
+    checkpointed: bool,
+) -> bool:
+    """Return whether checkpointed distributed LoRA uses the slim proxy path.
+
+    Args:
+        config: Estimator or measurement config.
+        checkpointed: Whether gradient checkpointing is enabled.
+
+    Returns:
+        Whether the run is a non-single-GPU checkpointed LoRA configuration.
+    """
+
+    return (
+        checkpointed
+        and config.tuning_mode == "lora"
+        and config.distributed_mode != "single_gpu"
+    )
+
+
 def _single_gpu_lora_visible_extra_fraction(*, model_spec: ModelSpec) -> float:
     """Return retained LoRA-visible extra fraction for single-GPU non-widened paths.
 
@@ -888,7 +910,10 @@ def _retained_forward_proxy_bytes(
                 + lora_low_rank_bytes
                 + checkpoint_resident_block_input_bytes
             )
-        if config.tuning_mode == "lora" and config.is_zero_mode():
+        if _uses_checkpointed_distributed_lora_proxy(
+            config=config,
+            checkpointed=checkpointed,
+        ):
             return (
                 checkpoint_context_bytes
                 + attention_saved_bytes
@@ -967,7 +992,10 @@ def _backward_phase_activation_bytes(
 
     if checkpointed:
         checkpoint_context_bytes = checkpoint_boundary_bytes
-        if config.tuning_mode == "lora" and config.is_zero_mode():
+        if _uses_checkpointed_distributed_lora_proxy(
+            config=config,
+            checkpointed=checkpointed,
+        ):
             return (
                 retained_forward_proxy_bytes
                 + saved_linear_input_bytes
@@ -1014,13 +1042,7 @@ def _checkpointed_sharded_lora_backward_visible_bytes(
 
     if config.tuning_mode != "lora" or not config.gradient_checkpointing:
         return 0
-    if not config.is_zero_mode():
-        return 0
-    visible_gap_bytes = max(0, visible_propagation_bytes - checkpoint_boundary_bytes)
-    return _scaled_int(
-        value=visible_gap_bytes,
-        factor=config.sharded_lora_backward_activation_fraction(),
-    )
+    return 0
 
 
 def build_activation_terms(

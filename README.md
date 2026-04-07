@@ -62,6 +62,18 @@ See [docs/qwen25_zero2_calibration.md](docs/qwen25_zero2_calibration.md) for the
 current ZeRO-2 measurement and calibration notes, including the 7B pass and the
 latest rebuilt flash/checkpointed suites.
 
+Rebuild the cleaned-corpus phase-aligned calibration report with:
+
+```bash
+python scripts/report_phase_aligned_calibration.py \
+  --canonical-csv benchmark_artifacts/_cleaned_corpus/canonical_measurements.csv \
+  --output benchmark_artifacts/_cleaned_corpus/phase_aligned_report_latest.md \
+  --tex-output benchmark_artifacts/_cleaned_corpus/phase_aligned_report_latest.tex
+```
+
+The canonical cleaned corpus now includes curated checkpointed long-context OLMo
+3 7B A100 suites alongside the earlier Qwen calibration artifacts.
+
 Recent persisted benchmark suites:
 
 - `benchmark_artifacts/qwen25_05b_ddp_seq128_512_mb1_mb2_iter1`

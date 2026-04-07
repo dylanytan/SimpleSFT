@@ -187,11 +187,42 @@ def _optimizer_reserved_carryover_bytes(
             activation_terms.debug.forward_phase_activation_bytes
             + workspace_terms.backward_workspace_bytes
         )
+    if config.tuning_mode == "lora" and config.distributed_mode != "single_gpu":
+        return _checkpointed_distributed_lora_reserved_carryover_bytes(
+            activation_terms=activation_terms,
+            workspace_terms=workspace_terms,
+        )
     if config.tuning_mode != "full_ft":
         return 0
     if not config.is_zero_mode():
         return 0
     return activation_terms.debug.backward_phase_activation_bytes
+
+
+def _checkpointed_distributed_lora_reserved_carryover_bytes(
+    *,
+    activation_terms,
+    workspace_terms,
+) -> int:
+    """Return reserved carryover for checkpointed distributed LoRA.
+
+    Args:
+        activation_terms: Retained activation terms from the structural model.
+        workspace_terms: Workspace terms from the structural model.
+
+    Returns:
+        Heuristic reserved carryover that approximates the soft-reserved stack
+        observed after long-context backward recompute and loss materialization.
+    """
+
+    return (
+        activation_terms.debug.forward_phase_activation_bytes
+        + workspace_terms.debug.loss_workspace_bytes
+        + workspace_terms.backward_workspace_bytes
+        + activation_terms.debug.checkpoint_boundary_bytes
+        + activation_terms.debug.saved_linear_input_bytes
+        + activation_terms.debug.residual_norm_bytes
+    )
 
 
 def estimate_peak_memory(

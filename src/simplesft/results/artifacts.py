@@ -29,7 +29,11 @@ from ..types import (
     SearchResult,
     VisionSpec,
 )
-from ..models.architecture_types import ArchitectureFamilySpec, AttentionSpec, TensorLayoutSpec
+from ..models.architecture_types import (
+    ArchitectureFamilySpec,
+    AttentionSpec,
+    TensorLayoutSpec,
+)
 
 
 def _ensure_parent_dir(path: Path) -> None:
@@ -141,11 +145,33 @@ def _load_phase_record(raw: dict[str, Any]) -> PhaseMemoryRecord:
     )
 
 
+def _filtered_payload(
+    *,
+    payload: dict[str, Any],
+    allowed_keys: set[str],
+) -> dict[str, Any]:
+    """Return one payload filtered down to dataclass-supported keys.
+
+    Args:
+        payload: Raw artifact payload that may contain legacy keys.
+        allowed_keys: Dataclass field names supported by the current loader.
+
+    Returns:
+        Copy of the payload containing only recognized keys.
+    """
+
+    return {key: value for key, value in payload.items() if key in allowed_keys}
+
+
 def _load_estimator_debug(raw: dict[str, Any] | None) -> EstimatorDebugInfo | None:
     """Deserialize the estimator debug payload when present."""
 
     if raw is None:
         return None
+    resident_state_keys = {field_info.name for field_info in fields(ResidentStateDebug)}
+    activation_keys = {field_info.name for field_info in fields(ActivationDebug)}
+    workspace_keys = {field_info.name for field_info in fields(WorkspaceDebug)}
+    phase_peak_keys = {field_info.name for field_info in fields(PhasePeakDebug)}
     resident_state_payload = {
         "parameter_bytes": 0,
         "gradient_bytes": 0,
@@ -155,13 +181,23 @@ def _load_estimator_debug(raw: dict[str, Any] | None) -> EstimatorDebugInfo | No
         "persistent_backend_buffer_bytes": 0,
         "trainable_parameter_bytes": 0,
     }
-    resident_state_payload.update(raw["resident_state"])
+    resident_state_payload.update(
+        _filtered_payload(
+            payload=raw["resident_state"],
+            allowed_keys=resident_state_keys,
+        )
+    )
     workspace_payload = {
         "zero_allgather_bucket_bytes": 0,
         "zero_reduce_bucket_bytes": 0,
         "zero_prefetch_bucket_bytes": 0,
     }
-    workspace_payload.update(raw["workspace"])
+    workspace_payload.update(
+        _filtered_payload(
+            payload=raw["workspace"],
+            allowed_keys=workspace_keys,
+        )
+    )
     activation_payload = {
         "base_hook_visible_activation_bytes": 0,
         "visible_propagation_bytes": 0,
@@ -187,12 +223,22 @@ def _load_estimator_debug(raw: dict[str, Any] | None) -> EstimatorDebugInfo | No
         "backward_phase_activation_bytes": 0,
         "hook_visible_activation_bytes": 0,
     }
-    activation_payload.update(raw["activations"])
+    activation_payload.update(
+        _filtered_payload(
+            payload=raw["activations"],
+            allowed_keys=activation_keys,
+        )
+    )
     return EstimatorDebugInfo(
         resident_state=ResidentStateDebug(**resident_state_payload),
         activations=ActivationDebug(**activation_payload),
         workspace=WorkspaceDebug(**workspace_payload),
-        phase_peaks=PhasePeakDebug(**raw["phase_peaks"]),
+        phase_peaks=PhasePeakDebug(
+            **_filtered_payload(
+                payload=raw["phase_peaks"],
+                allowed_keys=phase_peak_keys,
+            )
+        ),
     )
 
 
@@ -263,8 +309,8 @@ def load_comparison_result(*, path: str | Path) -> ComparisonResult:
             "intermediate_term_relative_error",
             {},
         ),
-        benchmark_metadata=raw["benchmark_metadata"],
-        notes=tuple(raw["notes"]),
+        benchmark_metadata=raw.get("benchmark_metadata", {}),
+        notes=tuple(raw.get("notes", ())),
     )
 
 

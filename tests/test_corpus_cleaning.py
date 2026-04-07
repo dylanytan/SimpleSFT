@@ -296,8 +296,53 @@ def test_clean_measurement_corpus_includes_curated_distributed_checkpoint_rows(
     assert result.checkpointed_rows_included == 2
     assert "toy_suite_zero2_ckpt" in canonical_csv
     assert "toy_suite_zero3_ckpt" in canonical_csv
-    assert (tmp_path / "zero2_h100_ckpt_20260406" / "toy_suite_zero2_ckpt" / "estimate.json").exists()
-    assert (tmp_path / "zero2_h100_ckpt_20260406" / "toy_suite_zero2_ckpt" / "comparison.json").exists()
+    assert (
+        tmp_path / "zero2_h100_ckpt_20260406" / "toy_suite_zero2_ckpt" / "estimate.json"
+    ).exists()
+    assert (
+        tmp_path
+        / "zero2_h100_ckpt_20260406"
+        / "toy_suite_zero2_ckpt"
+        / "comparison.json"
+    ).exists()
+
+
+def test_clean_measurement_corpus_includes_curated_olmo_a100_checkpoint_rows(
+    tmp_path: Path,
+) -> None:
+    """Cleaner should synthesize rows for the curated OLMo A100 checkpoint batch."""
+
+    _write_standalone_measurement_case(
+        root_dir=tmp_path,
+        artifact_dir="olmo3_7b_a10080gb_ckpt_flash2_clean_20260406/lora_zero3_ckpt_flash2_seq32768_mb1",
+        peak_gib=12.0,
+        distributed_mode="zero3",
+        model_name="allenai/Olmo-3-1025-7B",
+        attention_backend="flash2",
+        runtime_attention_implementation="flash_attention_2",
+    )
+    result = clean_measurement_corpus(
+        root_dir=tmp_path,
+        output_dir=tmp_path / "_cleaned",
+    )
+    canonical_csv = (tmp_path / "_cleaned" / "canonical_measurements.csv").read_text()
+    assert result.canonical_rows == 1
+    assert result.checkpointed_rows_dropped == 0
+    assert result.checkpointed_rows_included == 1
+    assert "lora_zero3_ckpt_flash2_seq32768_mb1" in canonical_csv
+    assert ",flash2," in canonical_csv
+    assert (
+        tmp_path
+        / "olmo3_7b_a10080gb_ckpt_flash2_clean_20260406"
+        / "lora_zero3_ckpt_flash2_seq32768_mb1"
+        / "estimate.json"
+    ).exists()
+    assert (
+        tmp_path
+        / "olmo3_7b_a10080gb_ckpt_flash2_clean_20260406"
+        / "lora_zero3_ckpt_flash2_seq32768_mb1"
+        / "comparison.json"
+    ).exists()
 
 
 def test_clean_measurement_corpus_normalizes_standard_backend_rows(
