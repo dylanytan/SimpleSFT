@@ -155,13 +155,21 @@ def test_web_server_serves_html_and_estimate_json() -> None:
         assert "Memory estimate workbench" in html
         assert "Memory Composition" in html
         assert "Candidate Strategies" in html
-        assert "Model Architecture" in html
         assert "Est. slowdown" in html
-        assert "Data parallel" in html
         assert "Fixed / Peak / Free" in html
         assert "Itemized view" in html
         assert "bar-marker peak" in html
         assert "bar-marker gpu" in html
+        assert "Backend buffers" in html
+        assert "Peak overhead" in html
+        assert "markerLabelStyle" in html
+        assert 'return "optim";' in html
+        assert "memory-tooltip" in html
+        assert "showMemoryTooltip" in html
+        assert 'data-tooltip="${escapeAttribute(tooltip)}"' in html
+        assert "submitEstimate();" in html
+        assert "Data parallel" in html
+        assert "World size" in html
         assert "Overhead" in html
         assert 'id="model_select"' in html
         assert '<optgroup label="Qwen">' in html
@@ -174,6 +182,17 @@ def test_web_server_serves_html_and_estimate_json() -> None:
         assert 'name="use_master_weights"' not in html
         assert 'name="distributed_mode"' not in html
         assert 'name="gradient_checkpointing"' not in html
+        assert "Per-GPU peak snapshot" not in html
+        assert "Checkpoint recompute is folded into activations" not in html
+        assert "Raw JSON" not in html
+        assert "Model Architecture" not in html
+        assert "Recommended Strategy" not in html
+        assert "Retained Activations" not in html
+        assert "Workspace Windows" not in html
+        assert "Phase Peaks" not in html
+        assert html.index("renderBreakdownBar(displayBreakdown),") < html.index(
+            'renderTable(\n          "Candidate Strategies",'
+        )
         request = Request(
             url=f"{base_url}/api/estimate",
             data=json.dumps(
@@ -233,6 +252,31 @@ def test_web_server_recommends_distributed_mode_for_multi_gpu_requests() -> None
         )
         payload = json.loads(urlopen(request).read().decode("utf-8"))
         assert payload["recommendation"]["config"]["distributed_mode"] != "single_gpu"
+
+
+def test_web_server_allows_tp_only_on_two_gpus() -> None:
+    """Two-GPU requests should admit a pure tensor-parallel candidate."""
+
+    with _running_server() as base_url:
+        request = Request(
+            url=f"{base_url}/api/estimate",
+            data=json.dumps(
+                {
+                    "model": "toy",
+                    "tuning_mode": "full_ft",
+                    "max_seq_len": 128,
+                    "gpus_per_node": 2,
+                    "gpu_memory_gb": 80,
+                    "tensor_parallel_degree": 2,
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        payload = json.loads(urlopen(request).read().decode("utf-8"))
+        assert payload["recommendation"]["config"]["distributed_mode"] == "tp_only"
+        assert payload["recommendation"]["config"]["tensor_parallel_degree"] == 2
+        assert payload["estimate"]["metadata"]["data_parallel_degree"] == 1
 
 
 def test_slowdown_model_prefers_zero2_over_ddp_tp2_when_both_fit() -> None:

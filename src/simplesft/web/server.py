@@ -161,8 +161,11 @@ def _build_lora_config(*, payload: dict[str, Any]) -> Optional[LoRAConfig]:
 def _recommended_modes(*, config: EstimatorConfig) -> tuple[str, ...]:
     """Return the recommended distributed-mode search order for one request."""
 
-    if config.gpus_per_node * config.num_nodes == 1:
+    available_gpu_count = config.gpus_per_node * config.num_nodes
+    if available_gpu_count == 1:
         return ("single_gpu",)
+    if available_gpu_count == 2:
+        return ("ddp", "tp_only", "zero2", "zero3")
     return ("ddp", "zero2", "zero3")
 
 
@@ -225,6 +228,8 @@ def _is_valid_strategy(
     data_parallel_degree = available_gpu_count // tensor_parallel_degree
     if distributed_mode == "single_gpu":
         return available_gpu_count == 1 and tensor_parallel_degree == 1
+    if distributed_mode == "tp_only":
+        return available_gpu_count == 2 and data_parallel_degree == 1
     if distributed_mode == "ddp":
         return data_parallel_degree >= 2
     if distributed_mode in {"zero2", "zero3"}:
@@ -315,6 +320,7 @@ def _distributed_slowdown_fraction(*, distributed_mode: str) -> float:
 
     return {
         "single_gpu": 0.00,
+        "tp_only": 0.00,
         "ddp": 0.03,
         "zero2": 0.08,
         "zero3": 0.18,
@@ -500,6 +506,7 @@ def _recommend_estimator_config(
     assert candidate_pairs, (
         "No valid optimization combinations for the requested GPU count. "
         "After tensor parallelism, DDP and ZeRO need at least 2-way data parallelism. "
+        "On 2 GPUs, pure TP is allowed only as tp_only with tensor_parallel_degree=2. "
         "Sequence parallel also requires tensor_parallel_degree > 1."
     )
     results = []

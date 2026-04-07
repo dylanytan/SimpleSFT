@@ -10,9 +10,10 @@ from ..types import EstimatorConfig, MemoryResult, ModelSpec, SearchResult
 
 SIMPLICITY_ORDER = {
     "single_gpu": 0,
-    "ddp": 1,
-    "zero2": 2,
-    "zero3": 3,
+    "tp_only": 1,
+    "ddp": 2,
+    "zero2": 3,
+    "zero3": 4,
 }
 
 

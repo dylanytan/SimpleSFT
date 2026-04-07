@@ -61,7 +61,7 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
       font-size: clamp(32px, 5vw, 58px);
       line-height: 0.95;
       letter-spacing: -0.04em;
-      max-width: 10ch;
+      max-width: 18ch;
     }
     .hero p {
       margin: 0;
@@ -239,12 +239,15 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
     }
     .bar-panel {
       display: grid;
-      gap: 14px;
-    }
-    .bar-meta {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
+      gap: 18px;
+      padding: 22px;
+      border-radius: calc(var(--radius) - 2px);
+      overflow: hidden;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(243,247,241,0.94) 100%),
+        radial-gradient(circle at top right, rgba(93,127,232,0.10), transparent 28%),
+        radial-gradient(circle at top left, rgba(26,127,86,0.10), transparent 26%);
+      border: 1px solid rgba(26,127,86,0.12);
     }
     .bar-group {
       display: grid;
@@ -258,38 +261,34 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
       color: var(--muted);
       font-weight: 700;
     }
-    .meta-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 7px 10px;
-      border-radius: 999px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,0.72);
-      font-size: 12px;
-      color: var(--muted);
-    }
-    .meta-chip strong {
-      color: var(--ink);
-      font-size: 13px;
-      letter-spacing: -0.02em;
-    }
     .bar-wrap {
       position: relative;
       display: grid;
-      gap: 8px;
+      gap: 10px;
     }
     .stacked-bar {
       display: flex;
       width: 100%;
-      min-height: 22px;
+      min-height: 24px;
       overflow: hidden;
       border-radius: 999px;
       background: rgba(22,33,23,0.08);
       border: 1px solid var(--line);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.55);
+    }
+    .stacked-bar.summary {
+      min-height: 26px;
+    }
+    .stacked-bar.detail {
+      min-height: 26px;
     }
     .stacked-segment {
       min-width: 2px;
+      cursor: help;
+      transition: filter 140ms ease;
+    }
+    .stacked-segment:hover {
+      filter: brightness(1.06);
     }
     .stacked-segment.phase {
       background-image: repeating-linear-gradient(
@@ -338,56 +337,46 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
     .bar-scale {
       display: flex;
       justify-content: space-between;
+      flex-wrap: wrap;
       gap: 12px;
       font-size: 12px;
       color: var(--muted);
     }
+    .memory-tooltip {
+      position: fixed;
+      z-index: 40;
+      max-width: min(260px, calc(100vw - 24px));
+      padding: 7px 9px;
+      border-radius: 10px;
+      background: rgba(22,33,23,0.94);
+      color: #f4f8f4;
+      font-size: 12px;
+      line-height: 1.35;
+      box-shadow: 0 12px 30px rgba(22,33,23,0.18);
+      pointer-events: none;
+    }
     .segment-legend {
-      display: grid;
-      gap: 10px;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 16px;
     }
     .legend-item {
-      display: flex;
+      display: inline-flex;
       align-items: center;
-      gap: 8px;
-      font-size: 12px;
+      gap: 7px;
+      font-size: 11px;
       color: var(--ink);
     }
     .legend-swatch {
-      width: 12px;
-      height: 12px;
+      width: 10px;
+      height: 10px;
       border-radius: 999px;
-      flex: 0 0 12px;
-    }
-    .legend-copy {
-      display: grid;
-      gap: 1px;
+      flex: 0 0 10px;
     }
     .legend-label {
-      font-weight: 700;
+      font-weight: 600;
       display: inline-flex;
       align-items: center;
-      gap: 6px;
-    }
-    .legend-value {
-      color: var(--muted);
-      font-size: 11px;
-    }
-    .legend-badge {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-width: 18px;
-      height: 18px;
-      padding: 0 5px;
-      border-radius: 999px;
-      border: 1px solid var(--line);
-      font-size: 10px;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      color: var(--muted);
-      background: rgba(255,255,255,0.76);
     }
     .card {
       border: 1px solid var(--line);
@@ -464,6 +453,7 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
     @media (max-width: 980px) {
       .layout { grid-template-columns: 1fr; }
       .field-grid { grid-template-columns: 1fr; }
+      .bar-panel { padding: 18px; }
     }
   </style>
 </head>
@@ -734,19 +724,34 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
     const modelSelect = document.getElementById("model_select");
     const customModelField = document.getElementById("custom-model-field");
     const customModelInput = document.getElementById("model_custom");
+    const memoryTooltip = document.createElement("div");
+    memoryTooltip.className = "memory-tooltip";
+    memoryTooltip.hidden = true;
+    document.body.appendChild(memoryTooltip);
 
-    const gib = (bytes) => (bytes / (1024 ** 3)).toFixed(3);
+    const gib = (bytes) => (bytes / (1024 ** 3)).toFixed(2);
     const breakdownColors = {
       parameters: "#1a7f56",
       gradients: "#2f9f79",
       optimizer: "#c96f2d",
+      backend_buffers: "#8b5a2b",
+      runtime_support: "#48555a",
       activations: "#5d7fe8",
-      overhead: "#48555a",
+      peak_overhead: "#59697a",
       transient: "#8e57c9",
+      phase_other: "#a164cf",
       fixed_summary: "#1f6e4d",
       phase_summary: "#6a63e7",
       free: "#cfe7d5"
     };
+
+    function escapeAttribute(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
 
     function syncFormSections() {
       const isLora = tuningModeInput.value === "lora";
@@ -873,6 +878,7 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
       const kernelOverheadBytes = peakPhaseKernelOverheadBytes(estimate);
       const commOverheadBytes = peakPhaseCommOverheadBytes(estimate);
       const fixedOverheadBytes = debug.resident_state.runtime_support_bytes;
+      const backendBufferBytes = debug.resident_state.persistent_backend_buffer_bytes;
       const phaseOverheadBytes = kernelOverheadBytes + commOverheadBytes;
       const optimizerBytes = (
         estimate.breakdown.optimizer_state_bytes
@@ -889,18 +895,33 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
         {key: "parameters", label: "Parameters", bytes: estimate.breakdown.parameter_bytes, scope: "fixed"},
         {key: "gradients", label: "Gradients", bytes: estimate.breakdown.gradient_bytes, scope: "fixed"},
         {key: "optimizer", label: "Optimizer state", bytes: optimizerBytes, scope: "fixed"},
-        {key: "overhead", label: "Overhead", bytes: fixedOverheadBytes, scope: "fixed"},
+        {key: "backend_buffers", label: "Backend buffers", bytes: backendBufferBytes, scope: "fixed"},
+        {key: "runtime_support", label: "Runtime support", bytes: fixedOverheadBytes, scope: "fixed"},
       ];
+      const fixedBytes = fixedItems.reduce((sum, item) => sum + item.bytes, 0);
+      const phaseBytes = Math.max(0, peakBytes - fixedBytes);
       const phaseItems = [
         {key: "activations", label: "Activations", bytes: activationBytes, scope: "phase"},
-        {key: "overhead", label: "Overhead", bytes: phaseOverheadBytes, scope: "phase"},
-        {key: "transient", label: "Transient", bytes: transientBytes, scope: "phase"},
+        {key: "peak_overhead", label: "Peak overhead", bytes: phaseOverheadBytes, scope: "phase"},
+        {key: "transient", label: "Scratch", bytes: transientBytes, scope: "phase"},
       ];
+      const phaseGapBytes = Math.max(
+        0,
+        phaseBytes - phaseItems.reduce((sum, item) => sum + item.bytes, 0),
+      );
+      if (phaseGapBytes > 0) {
+        phaseItems.push({
+          key: "phase_other",
+          label: "Other peak bytes",
+          bytes: phaseGapBytes,
+          scope: "phase",
+        });
+      }
       const freeBytes = Math.max(0, gpuBytes - peakBytes);
       const totalScaleBytes = Math.max(gpuBytes, peakBytes);
       const summaryItems = [
-        {key: "fixed_summary", label: "Fixed", bytes: fixedItems.reduce((sum, item) => sum + item.bytes, 0), scope: "fixed"},
-        {key: "phase_summary", label: "Peak phase", bytes: phaseItems.reduce((sum, item) => sum + item.bytes, 0), scope: "phase"},
+        {key: "fixed_summary", label: "Fixed", bytes: fixedBytes, scope: "fixed"},
+        {key: "phase_summary", label: "Peak", bytes: phaseBytes, scope: "phase"},
         {key: "free", label: "Free", bytes: freeBytes, scope: "free"},
       ];
       return {
@@ -910,8 +931,8 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
           ...phaseItems,
           {key: "free", label: "Free", bytes: freeBytes, scope: "free"},
         ],
-        fixedBytes: summaryItems[0].bytes,
-        phaseBytes: summaryItems[1].bytes,
+        fixedBytes,
+        phaseBytes,
         freeBytes,
         gpuBytes,
         peakBytes,
@@ -919,6 +940,7 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
         kernelOverheadBytes,
         commOverheadBytes,
         fixedOverheadBytes,
+        backendBufferBytes,
       };
     }
 
@@ -931,7 +953,65 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
       `;
     }
 
-    function renderBarWrap(items, displayBreakdown) {
+    function displayPhaseName(phaseName) {
+      if (phaseName === "optimizer_step") {
+        return "optim";
+      }
+      return phaseName;
+    }
+
+    function tooltipSegment(target) {
+      if (!(target instanceof Element)) {
+        return null;
+      }
+      return target.closest(".stacked-segment");
+    }
+
+    function positionMemoryTooltip(clientX, clientY) {
+      const offsetX = 14;
+      const offsetY = 14;
+      const tooltipWidth = memoryTooltip.offsetWidth;
+      const tooltipHeight = memoryTooltip.offsetHeight;
+      const maxLeft = Math.max(12, window.innerWidth - tooltipWidth - 12);
+      const maxTop = Math.max(12, window.innerHeight - tooltipHeight - 12);
+      const left = Math.min(maxLeft, Math.max(12, clientX + offsetX));
+      const top = Math.min(maxTop, Math.max(12, clientY - tooltipHeight - offsetY));
+      memoryTooltip.style.left = `${left}px`;
+      memoryTooltip.style.top = `${top}px`;
+    }
+
+    function showMemoryTooltip(segment, clientX, clientY) {
+      const tooltip = segment.dataset.tooltip;
+      if (!tooltip) {
+        memoryTooltip.hidden = true;
+        return;
+      }
+      memoryTooltip.textContent = tooltip;
+      memoryTooltip.hidden = false;
+      positionMemoryTooltip(clientX, clientY);
+    }
+
+    function hideMemoryTooltip() {
+      memoryTooltip.hidden = true;
+    }
+
+    function markerStyle(positionPercent) {
+      const clampedPosition = Math.min(99.6, Math.max(0.4, positionPercent));
+      return `left:${clampedPosition}%;`;
+    }
+
+    function markerLabelStyle(positionPercent) {
+      const clampedPosition = Math.min(99.6, Math.max(0.4, positionPercent));
+      if (clampedPosition <= 6) {
+        return `left:${clampedPosition}%;transform:none;`;
+      }
+      if (clampedPosition >= 94) {
+        return `left:${clampedPosition}%;transform:translateX(-100%);`;
+      }
+      return `left:${clampedPosition}%;transform:translateX(-50%);`;
+    }
+
+    function renderBarWrap(items, displayBreakdown, variant) {
       const totalBytes = displayBreakdown.totalScaleBytes;
       const gpuMarkerLeft = totalBytes === 0 ? 0 : (displayBreakdown.gpuBytes / totalBytes) * 100;
       const peakMarkerLeft = totalBytes === 0 ? 0 : (displayBreakdown.peakBytes / totalBytes) * 100;
@@ -939,16 +1019,17 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
         .filter((item) => item.bytes > 0)
         .map((item) => {
           const width = totalBytes === 0 ? 0 : (item.bytes / totalBytes) * 100;
-          return `<div class="stacked-segment ${item.scope}" style="width:${width}%;background:${breakdownColors[item.key]};"></div>`;
+          const tooltip = `${item.label}: ${gib(item.bytes)} GiB`;
+          return `<div class="stacked-segment ${item.scope}" tabindex="0" data-tooltip="${escapeAttribute(tooltip)}" aria-label="${escapeAttribute(tooltip)}" style="width:${width}%;background:${breakdownColors[item.key]};"></div>`;
         })
         .join("");
       return `
-        <div class="bar-wrap">
-          <div class="stacked-bar">${segments}</div>
-          <div class="bar-marker gpu" style="left:${gpuMarkerLeft}%"></div>
-          <div class="bar-marker-label" style="left:${gpuMarkerLeft}%">GPU</div>
-          <div class="bar-marker peak" style="left:${peakMarkerLeft}%"></div>
-          <div class="bar-marker-label" style="left:${peakMarkerLeft}%">Peak</div>
+        <div class="bar-wrap ${variant}">
+          <div class="stacked-bar ${variant}">${segments}</div>
+          <div class="bar-marker gpu" style="${markerStyle(gpuMarkerLeft)}"></div>
+          <div class="bar-marker-label" style="${markerLabelStyle(gpuMarkerLeft)}">GPU</div>
+          <div class="bar-marker peak" style="${markerStyle(peakMarkerLeft)}"></div>
+          <div class="bar-marker-label" style="${markerLabelStyle(peakMarkerLeft)}">Peak</div>
           ${renderBarScale(displayBreakdown)}
         </div>
       `;
@@ -960,10 +1041,7 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
         .map((item) => `
           <div class="legend-item">
             <div class="legend-swatch" style="background:${breakdownColors[item.key]};"></div>
-            <div class="legend-copy">
-              <div class="legend-label">${item.label}<span class="legend-badge">${item.scope === "fixed" ? "Fixed" : item.scope === "phase" ? "Peak" : "Free"}</span></div>
-              <div class="legend-value">${gib(item.bytes)} GiB</div>
-            </div>
+            <div class="legend-label">${item.label}</div>
           </div>
         `)
         .join("");
@@ -971,27 +1049,24 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function renderBreakdownBar(displayBreakdown) {
-      const summaryBar = renderBarWrap(displayBreakdown.summaryItems, displayBreakdown);
-      const itemizedBar = renderBarWrap(displayBreakdown.items, displayBreakdown);
+      const summaryBar = renderBarWrap(displayBreakdown.summaryItems, displayBreakdown, "summary");
+      const summaryLegend = renderBreakdownLegend(displayBreakdown.summaryItems);
+      const itemizedBar = renderBarWrap(displayBreakdown.items, displayBreakdown, "detail");
+      const itemizedLegend = renderBreakdownLegend(displayBreakdown.items);
       return `
         <section class="panel">
           <div class="panel-inner bar-panel">
             <h2 class="section-title">Memory Composition</h2>
-            <div class="bar-meta">
-              <div class="meta-chip">Fixed <strong>${gib(displayBreakdown.fixedBytes)} GiB</strong></div>
-              <div class="meta-chip">Peak phase <strong>${gib(displayBreakdown.phaseBytes)} GiB</strong></div>
-              <div class="meta-chip">Free <strong>${gib(displayBreakdown.freeBytes)} GiB</strong></div>
-            </div>
             <div class="bar-group">
               <p class="bar-subtitle">Fixed / Peak / Free</p>
               ${summaryBar}
+              ${summaryLegend}
             </div>
             <div class="bar-group">
               <p class="bar-subtitle">Itemized view</p>
               ${itemizedBar}
+              ${itemizedLegend}
             </div>
-            ${renderBreakdownLegend(displayBreakdown.items)}
-            <div class="hint">Checkpoint recompute is folded into activations. Overhead includes runtime support, peak-phase comm buffers, and peak-phase kernel workspace.</div>
           </div>
         </section>
       `;
@@ -1001,21 +1076,7 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
       const estimate = data.estimate;
       const recommendation = data.recommendation;
       const displayBreakdown = buildDisplayBreakdown(estimate);
-      const debug = estimate.debug;
       const model = data.model_spec;
-      const cards = `
-        <div class="cards">
-          <div class="card"><div class="card-title">Peak</div><div class="card-value">${estimate.global_peak_gb.toFixed(3)} GiB</div></div>
-          <div class="card"><div class="card-title">Headroom</div><div class="card-value">${estimate.headroom_gb.toFixed(3)} GiB</div></div>
-          <div class="card"><div class="card-title">Peak phase</div><div class="card-value">${estimate.peak_phase}</div></div>
-          <div class="card"><div class="card-title">Strategy</div><div class="card-value">${recommendation.config.distributed_mode}</div></div>
-          <div class="card"><div class="card-title">Data parallel</div><div class="card-value">${estimate.metadata.data_parallel_degree}x</div></div>
-          <div class="card"><div class="card-title">Tensor parallel</div><div class="card-value">${recommendation.config.tensor_parallel_degree}x</div></div>
-          <div class="card"><div class="card-title">Sequence parallel</div><div class="card-value">${recommendation.config.sequence_parallel ? `on (tp=${recommendation.config.tensor_parallel_degree})` : "off"}</div></div>
-          <div class="card"><div class="card-title">Checkpointing</div><div class="card-value">${recommendation.config.gradient_checkpointing ? "on" : "off"}</div></div>
-          <div class="card"><div class="card-title">World size</div><div class="card-value">${estimate.metadata.world_size}</div></div>
-        </div>
-      `;
       const top = `
         <section class="status panel">
           <div>
@@ -1025,57 +1086,19 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
           <div class="pill ${estimate.feasible ? "ok" : "oom"}">${estimate.feasible ? "Fits" : "OOM risk"}</div>
         </section>
       `;
-      const architectureRows = [
-        ["Organization", data.catalog_entry ? data.catalog_entry.organization : (model.model_name.includes("/") ? model.model_name.split("/")[0] : "custom")],
-        ["Support status", data.support_status],
-        ["Catalog status", data.catalog_status],
-        ["Architecture family", model.architecture_family.display_name],
-        ["Model type", model.model_type],
-        ["Attention", `${model.attention.num_query_heads} query heads · ${model.attention.num_key_value_heads} KV heads · head_dim ${model.attention.head_dim}`],
-        ["Sliding window", model.attention.sliding_window_size ? `${model.attention.sliding_window_size}` : "full attention"],
-        ["TP-aware layout", model.tensor_layout_summary]
-      ];
-      const breakdownRows = displayBreakdown.items
-        .filter((item) => item.key !== "free" && item.bytes > 0)
-        .map((item) => [`${item.label} (${item.scope === "fixed" ? "fixed" : "peak"})`, `${gib(item.bytes)} GiB`]);
-      const overheadRows = [
-        ["Runtime support", `${gib(displayBreakdown.fixedOverheadBytes)} GiB`],
-        ["Peak-phase kernel workspace", `${gib(displayBreakdown.kernelOverheadBytes)} GiB`],
-        ["Peak-phase comm buffers", `${gib(displayBreakdown.commOverheadBytes)} GiB`]
-      ];
-      const activationRows = [
-        ["Saved linear inputs", `${gib(debug.activations.saved_linear_input_bytes)} GiB`],
-        ["Residual / norm", `${gib(debug.activations.residual_norm_bytes)} GiB`],
-        ["Checkpoint boundaries", `${gib(debug.activations.checkpoint_boundary_bytes)} GiB`],
-        ["Attention saved", `${gib(debug.activations.attention_saved_bytes)} GiB`],
-        ["Loss state", `${gib(debug.activations.loss_state_bytes)} GiB`],
-        ["LoRA low-rank", `${gib(debug.activations.lora_low_rank_bytes)} GiB`],
-        ["Expanded-query", `${gib(debug.activations.expanded_query_saved_bytes)} GiB`],
-        ["Hook-visible (diag)", `${gib(debug.activations.hook_visible_activation_bytes)} GiB`]
-      ];
-      const workspaceRows = [
-        ["Forward attention", `${gib(debug.workspace.attention_forward_workspace_bytes)} GiB`],
-        ["Backward kernel", `${gib(debug.workspace.backward_kernel_workspace_bytes)} GiB`],
-        ["Recompute", `${gib(debug.workspace.recompute_workspace_bytes)} GiB`],
-        ["Optimizer update", `${gib(debug.workspace.optimizer_update_workspace_bytes)} GiB`],
-        ["DDP reducer", `${gib(debug.workspace.ddp_reducer_bucket_bytes)} GiB`],
-        ["ZeRO all-gather bucket", `${gib(debug.workspace.zero_allgather_bucket_bytes)} GiB`],
-        ["ZeRO reduce bucket", `${gib(debug.workspace.zero_reduce_bucket_bytes)} GiB`],
-        ["ZeRO prefetch bucket", `${gib(debug.workspace.zero_prefetch_bucket_bytes)} GiB`],
-        ["ZeRO fetch", `${gib(debug.workspace.zero_fetch_window_bytes)} GiB`],
-        ["ZeRO update", `${gib(debug.workspace.zero_update_window_bytes)} GiB`],
-        ["ZeRO comm", `${gib(debug.workspace.zero_comm_window_bytes)} GiB`],
-        ["TP comm", `${gib(debug.workspace.tensor_parallel_comm_window_bytes)} GiB`],
-        ["SP comm", `${gib(debug.workspace.sequence_parallel_comm_window_bytes)} GiB`]
-      ];
-      const phaseRows = estimate.phase_records.map((record) => [
-        record.phase_name,
-        `${gib(record.peak_allocated_bytes)} GiB`
-      ]);
-      const recommendationRows = recommendation.rationale.map((message, index) => [
-        `Reason ${index + 1}`,
-        message
-      ]);
+      const cards = `
+        <div class="cards">
+          <div class="card"><div class="card-title">Peak</div><div class="card-value">${estimate.global_peak_gb.toFixed(2)} GiB</div></div>
+          <div class="card"><div class="card-title">Headroom</div><div class="card-value">${estimate.headroom_gb.toFixed(2)} GiB</div></div>
+          <div class="card"><div class="card-title">Peak phase</div><div class="card-value">${displayPhaseName(estimate.peak_phase)}</div></div>
+          <div class="card"><div class="card-title">Strategy</div><div class="card-value">${recommendation.config.distributed_mode}</div></div>
+          <div class="card"><div class="card-title">Data parallel</div><div class="card-value">${estimate.metadata.data_parallel_degree}x</div></div>
+          <div class="card"><div class="card-title">Tensor parallel</div><div class="card-value">${recommendation.config.tensor_parallel_degree}x</div></div>
+          <div class="card"><div class="card-title">Sequence parallel</div><div class="card-value">${recommendation.config.sequence_parallel ? `on (tp=${recommendation.config.tensor_parallel_degree})` : "off"}</div></div>
+          <div class="card"><div class="card-title">Checkpointing</div><div class="card-value">${recommendation.config.gradient_checkpointing ? "on" : "off"}</div></div>
+          <div class="card"><div class="card-title">World size</div><div class="card-value">${estimate.metadata.world_size}</div></div>
+        </div>
+      `;
       const candidateRows = recommendation.candidates.map((candidate, index) => [
         `#${index + 1}`,
         [
@@ -1086,28 +1109,19 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
           candidate.gradient_checkpointing ? "ckpt" : "no-ckpt"
         ].join(" · "),
         candidate.feasible ? "fits" : "oom",
-        `${candidate.global_peak_gb.toFixed(3)} GiB`,
-        `${candidate.headroom_gb.toFixed(3)} GiB`,
+        `${candidate.global_peak_gb.toFixed(2)} GiB`,
+        `${candidate.headroom_gb.toFixed(2)} GiB`,
         `${candidate.estimated_slowdown_percent.toFixed(1)}%`
       ]);
-      const debugJson = JSON.stringify(data, null, 2);
       resultRoot.className = "stack";
       resultRoot.innerHTML = [
         top,
+        renderBreakdownBar(displayBreakdown),
         cards,
-        renderTable("Model Architecture", architectureRows),
-        renderTable("Recommended Strategy", recommendationRows),
         renderTable(
           "Candidate Strategies",
           [["Rank", "Configuration", "Fit", "Peak", "Headroom", "Est. slowdown"], ...candidateRows]
-        ),
-        renderBreakdownBar(displayBreakdown),
-        renderTable("Breakdown", breakdownRows),
-        renderTable("Overhead", overheadRows),
-        renderTable("Retained Activations", activationRows),
-        renderTable("Workspace Windows", workspaceRows),
-        renderTable("Phase Peaks", phaseRows),
-        `<section class="panel"><div class="panel-inner"><h2 class="section-title">Raw JSON</h2><pre>${debugJson.replace(/[<>&]/g, (char) => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[char]))}</pre></div></section>`
+        )
       ].join("");
     }
 
@@ -1142,6 +1156,53 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
       }
     }
 
+    resultRoot.addEventListener("mousemove", (event) => {
+      const segment = tooltipSegment(event.target);
+      if (segment === null || memoryTooltip.hidden) {
+        return;
+      }
+      positionMemoryTooltip(event.clientX, event.clientY);
+    });
+
+    resultRoot.addEventListener("mouseover", (event) => {
+      const segment = tooltipSegment(event.target);
+      if (segment === null) {
+        return;
+      }
+      showMemoryTooltip(segment, event.clientX, event.clientY);
+    });
+
+    resultRoot.addEventListener("mouseout", (event) => {
+      const segment = tooltipSegment(event.target);
+      const nextSegment = tooltipSegment(event.relatedTarget);
+      if (segment === null || segment === nextSegment) {
+        return;
+      }
+      hideMemoryTooltip();
+    });
+
+    resultRoot.addEventListener("focusin", (event) => {
+      const segment = tooltipSegment(event.target);
+      if (segment === null) {
+        return;
+      }
+      const rect = segment.getBoundingClientRect();
+      showMemoryTooltip(segment, rect.left + (rect.width / 2), rect.top);
+    });
+
+    resultRoot.addEventListener("focusout", (event) => {
+      if (tooltipSegment(event.target) === null) {
+        return;
+      }
+      hideMemoryTooltip();
+    });
+
+    window.addEventListener("scroll", () => {
+      if (!memoryTooltip.hidden) {
+        hideMemoryTooltip();
+      }
+    });
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       await submitEstimate();
@@ -1165,6 +1226,7 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
     modelSelect.addEventListener("change", syncModelField);
     syncFormSections();
     syncModelField();
+    submitEstimate();
   </script>
 </body>
 </html>

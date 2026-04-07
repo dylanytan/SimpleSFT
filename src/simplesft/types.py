@@ -312,7 +312,7 @@ class EstimatorConfig:
 
     Args:
         tuning_mode: One of `full_ft` or `lora`.
-        distributed_mode: `single_gpu`, `ddp`, `zero2`, or `zero3`.
+        distributed_mode: `single_gpu`, `tp_only`, `ddp`, `zero2`, or `zero3`.
         optimizer_name: Optimizer family name such as `adamw` or `sgd`.
         attention_backend: Attention kernel family label.
         gradient_checkpointing: Whether checkpointing is enabled.
