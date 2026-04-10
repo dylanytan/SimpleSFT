@@ -16,3 +16,5 @@ estimator_report/*.out
 estimator_report/*.pdf
 estimator_report/*.synctex.gz
 estimator_report/generated/
+training_configs/
+sft_output/

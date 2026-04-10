@@ -23,6 +23,7 @@ from .measurement.measure import measure_peak_memory
 from .results.rebuild import rebuild_benchmark_suite_from_measurements
 from .results.reporting import render_comparison_report, render_suite_report
 from .results.search import search_configurations
+from .results.export import export_candidates_to_trl
 from .types import EstimatorConfig, LoRAConfig, MeasurementConfig
 from .web.server import serve_web_interface
 
@@ -180,6 +181,12 @@ def _handle_search(args: argparse.Namespace) -> None:
         for distributed_mode in args.distributed_modes
     ]
     result = search_configurations(model=args.model, configs=configs)
+    
+    if args.export_file:
+        feasible = [c for c in result.candidates]
+        if feasible:
+            export_candidates_to_trl(feasible, args.export_file)
+            
     _print_json(payload=asdict(result))
 
 
@@ -283,6 +290,23 @@ def _handle_web(args: argparse.Namespace) -> None:
     )
 
 
+def _handle_train(args: argparse.Namespace) -> None:
+    """Handle the `train` subcommand."""
+    from .sft_trainer import run_sft
+
+    max_steps = 5 if args.test_run else args.max_steps
+    run_sft(
+        config_path=args.config,
+        model_id=args.model,
+        dataset_id=args.dataset,
+        dataset_config=args.dataset_config,
+        dataset_text_field=args.dataset_text_field,
+        format_template=args.format_template,
+        max_steps=max_steps,
+        output_dir=args.output_dir,
+    )
+
+
 def main() -> None:
     """Run the SimpleSFT command-line interface."""
 
@@ -320,6 +344,7 @@ def main() -> None:
     search_parser.add_argument("--gpu-memory-gb", type=float, default=24.0)
     search_parser.add_argument("--gpus-per-node", type=int, default=1)
     search_parser.add_argument("--lora-rank", type=int, default=16)
+    search_parser.add_argument("--export-file")
 
     benchmark_parser = subparsers.add_parser("benchmark")
     benchmark_parser.add_argument("model")
@@ -372,7 +397,37 @@ def main() -> None:
     web_parser.add_argument("--port", type=int, default=8765)
     web_parser.add_argument("--no-browser", action="store_true")
 
+    train_parser = subparsers.add_parser("train")
+    train_parser.add_argument("--config", required=True, help="Path to JSON config exported from SimpleSFT")
+    train_parser.add_argument("--model", required=True, help="Model ID or path (e.g., 'meta-llama/Llama-2-7b-hf')")
+    train_parser.add_argument("--dataset", required=True, help="Dataset ID or path (e.g., 'timdettmers/openassistant-guanaco')")
+    train_parser.add_argument("--dataset-config", help="Dataset configuration string (e.g., 'en' for subsets)")
+    train_parser.add_argument(
+        "--dataset-text-field",
+        default="text",
+        help="Plain-text column if present; otherwise layout is chosen automatically",
+    )
+    train_parser.add_argument(
+        "--format-template",
+        help="Optional {Column} template; overrides automatic formatting",
+    )
+    train_parser.add_argument("--output-dir", default="./sft_output", help="Output directory for model and checkpoints")
+    train_parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Stop after N optimizer steps (for smoke tests)",
+    )
+    train_parser.add_argument(
+        "--test-run",
+        action="store_true",
+        help="Run only 5 training steps (same as --max-steps 5)",
+    )
+
     args = parser.parse_args()
+    if args.command == "train" and args.test_run and args.max_steps is not None:
+        parser.error("Use either --test-run or --max-steps, not both")
     handlers = {
         "inspect": _handle_inspect,
         "estimate": _handle_estimate,
@@ -384,6 +439,7 @@ def main() -> None:
         "rebuild-benchmark": _handle_rebuild_benchmark,
         "clean-corpus": _handle_clean_corpus,
         "web": _handle_web,
+        "train": _handle_train,
     }
     handlers[args.command](args)
 

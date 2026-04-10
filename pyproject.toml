@@ -24,6 +24,10 @@ lora = [
 zero2 = [
   "deepspeed>=0.14",
 ]
+train = [
+  "datasets>=2.0",
+  "trl>=0.8",
+]
 
 [project.scripts]
 simplesft = "simplesft.cli:main"

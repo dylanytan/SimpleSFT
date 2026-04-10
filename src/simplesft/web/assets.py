@@ -422,6 +422,7 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
       letter-spacing: 0.07em;
     }
     td:last-child, th:last-child { text-align: right; }
+    td[data-col="export"], th[data-col="export"] { text-align: center; }
     pre {
       margin: 0;
       padding: 14px;
@@ -722,6 +723,8 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
     const loraSection = document.getElementById("lora-section");
     const tuningModeInput = document.getElementById("tuning_mode");
     const modelSelect = document.getElementById("model_select");
+
+    let currentTrlConfigs = null;
     const customModelField = document.getElementById("custom-model-field");
     const customModelInput = document.getElementById("model_custom");
     const memoryTooltip = document.createElement("div");
@@ -820,8 +823,16 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function renderTable(title, rows) {
-      const body = rows.map((row) => {
-        const cells = row.map((value) => `<td>${value}</td>`).join("");
+      const [headerRow, ...bodyRows] = rows;
+      const headerCells = headerRow.map((value) =>
+        `<th${value === "Export" ? ' style="text-align:center;"' : ""}>${value}</th>`
+      ).join("");
+      const header = `<thead><tr>${headerCells}</tr></thead>`;
+      const body = bodyRows.map((row) => {
+        const cells = row.map((value, colIndex) => {
+          const isExport = colIndex === row.length - 1 && headerRow[colIndex] === "Export";
+          return `<td${isExport ? ' style="text-align:center;"' : ""}>${value}</td>`;
+        }).join("");
         return `<tr>${cells}</tr>`;
       }).join("");
       return `
@@ -829,6 +840,7 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
           <div class="panel-inner">
             <h2 class="section-title">${title}</h2>
             <table>
+              ${header}
               <tbody>${body}</tbody>
             </table>
           </div>
@@ -1111,7 +1123,14 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
         candidate.feasible ? "fits" : "oom",
         `${candidate.global_peak_gb.toFixed(2)} GiB`,
         `${candidate.headroom_gb.toFixed(2)} GiB`,
-        `${candidate.estimated_slowdown_percent.toFixed(1)}%`
+        `${candidate.estimated_slowdown_percent.toFixed(1)}%`,
+        data.trl_configs && data.trl_configs[index]
+          ? `<button
+               class="secondary"
+               data-trl-index="${index}"
+               style="font-size:11px;padding:5px 10px;border-radius:999px;cursor:pointer;"
+             >&#8659; TRL</button>`
+          : ""
       ]);
       resultRoot.className = "stack";
       resultRoot.innerHTML = [
@@ -1120,7 +1139,7 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
         cards,
         renderTable(
           "Candidate Strategies",
-          [["Rank", "Configuration", "Fit", "Peak", "Headroom", "Est. slowdown"], ...candidateRows]
+          [["Rank", "Configuration", "Fit", "Peak", "Headroom", "Est. slowdown", "Export"], ...candidateRows]
         )
       ].join("");
     }
@@ -1137,6 +1156,7 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
       clearError();
       submitBtn.disabled = true;
       submitBtn.textContent = "Estimating...";
+      currentTrlConfigs = null;
       try {
         const response = await fetch("/api/estimate", {
           method: "POST",
@@ -1147,6 +1167,7 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
         if (!response.ok) {
           throw new Error(payload.error || "Estimate failed.");
         }
+        currentTrlConfigs = payload.trl_configs || null;
         renderResult(payload);
       } catch (error) {
         showError(error.message);
@@ -1162,6 +1183,20 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
         return;
       }
       positionMemoryTooltip(event.clientX, event.clientY);
+    });
+
+    resultRoot.addEventListener("click", (event) => {
+      const btn = event.target.closest("[data-trl-index]");
+      if (!btn || !currentTrlConfigs) return;
+      const index = parseInt(btn.dataset.trlIndex, 10);
+      const cfg = currentTrlConfigs[index];
+      if (!cfg) return;
+      const a = document.createElement("a");
+      a.href = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify([cfg], null, 2));
+      a.download = `trl_config_candidate_${index + 1}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     });
 
     resultRoot.addEventListener("mouseover", (event) => {
