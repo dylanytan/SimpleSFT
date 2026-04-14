@@ -51,6 +51,42 @@ simplesft report --input-dir benchmark_artifacts/iter1 --iteration-name "Iterati
 The web UI is a local stdlib server. It exposes a form-driven estimator
 workbench on `/` and a JSON API on `/api/estimate`.
 
+## Training (SFT)
+
+SimpleSFT can export a feasible training strategy (batch size, seq len, precision, LoRA vs full fine-tune, etc.) into a Hugging Face TRL-compatible YAML file, and then run an actual supervised fine-tuning job using TRL's `SFTTrainer`.
+
+Export a candidate strategy config from `search`:
+
+```bash
+simplesft search sshleifer/tiny-gpt2 \
+  --seq-lens 128 256 \
+  --micro-batches 1 2 \
+  --export-file ./trl_strategy.yaml
+```
+
+Then run training with that exported strategy:
+
+```bash
+simplesft train \
+  --config ./trl_strategy.yaml \
+  --dataset timdettmers/openassistant-guanaco \
+  --output-dir ./sft_output \
+  --test-run
+```
+
+Notes:
+
+- The exported YAML may contain a list of candidate strategies; the training runner will use the first entry.
+- Override the model (otherwise it is read from the exported config's `model` field):
+
+```bash
+simplesft train --config ./trl_strategy.yaml --model sshleifer/tiny-gpt2 --dataset timdettmers/openassistant-guanaco
+```
+
+- For datasets that need a subset/config (e.g. language splits), pass `--dataset-config`.
+- For non-plain-text datasets, SimpleSFT will infer a formatting function automatically, or you can provide `--format-template` with `{Column}` placeholders.
+- The same runner is available as a standalone script if you prefer: `python scripts/run_sft.py --config ./trl_strategy.yaml --dataset ...`.
+
 ## Developer Iteration
 
 See [docs/developer_iteration_guide.md](docs/developer_iteration_guide.md) for the manual four-iteration calibration loop.

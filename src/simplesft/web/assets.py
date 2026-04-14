@@ -1185,18 +1185,35 @@ APP_HTML_TEMPLATE = r"""<!doctype html>
       positionMemoryTooltip(event.clientX, event.clientY);
     });
 
-    resultRoot.addEventListener("click", (event) => {
+    resultRoot.addEventListener("click", async (event) => {
       const btn = event.target.closest("[data-trl-index]");
       if (!btn || !currentTrlConfigs) return;
       const index = parseInt(btn.dataset.trlIndex, 10);
       const cfg = currentTrlConfigs[index];
       if (!cfg) return;
-      const a = document.createElement("a");
-      a.href = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify([cfg], null, 2));
-      a.download = `trl_config_candidate_${index + 1}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      try {
+        const response = await fetch("/api/trl-config-yaml", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ config: cfg })
+        });
+        if (!response.ok) {
+          const errPayload = await response.json().catch(() => ({}));
+          throw new Error(errPayload.error || "YAML export failed.");
+        }
+        const yamlText = await response.text();
+        const blob = new Blob([yamlText], { type: "text/yaml;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `trl_config_candidate_${index + 1}.yaml`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        showError(error.message);
+      }
     });
 
     resultRoot.addEventListener("mouseover", (event) => {

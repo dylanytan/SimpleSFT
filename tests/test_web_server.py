@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import socket
+
+import yaml
 import threading
 from contextlib import contextmanager
 from typing import Iterator
@@ -325,6 +327,31 @@ def test_ranking_prefers_more_headroom_for_same_strategy() -> None:
     assert _strategy_score(result=roomier_result) < _strategy_score(
         result=tighter_result
     )
+
+
+def test_web_server_trl_config_yaml_endpoint() -> None:
+    """POST /api/trl-config-yaml should return YAML matching the web download format."""
+
+    with _running_server() as base_url:
+        sample = {
+            "per_device_train_batch_size": 1,
+            "max_seq_length": 512,
+            "use_peft": False,
+            "_simplesft_metadata": {"feasible": True},
+        }
+        request = Request(
+            url=f"{base_url}/api/trl-config-yaml",
+            data=json.dumps({"config": sample}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request) as response:
+            assert "yaml" in (response.headers.get("Content-Type") or "").lower()
+            body = response.read().decode("utf-8")
+        parsed = yaml.safe_load(body)
+        assert isinstance(parsed, list) and len(parsed) == 1
+        assert parsed[0]["max_seq_length"] == 512
+        assert parsed[0]["_simplesft_metadata"]["feasible"] is True
 
 
 def test_web_server_rejects_invalid_zero_tp_configuration() -> None:

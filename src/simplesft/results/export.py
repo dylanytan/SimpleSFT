@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-import json
-from typing import Iterable
+from pathlib import Path
+from typing import Any, Iterable
+
+import yaml
 
 from ..types import MemoryResult
 
@@ -19,6 +21,10 @@ def _map_to_trl_config(result: MemoryResult) -> dict:
         optim = "adamw_torch"
 
     trl_args = {
+        # Convenience: keep the originating model alongside the strategy args.
+        # (Ignored by TRL itself; consumed by downstream tooling / humans.)
+        "model": result.model_name,
+
         # Model / Training loop defaults
         "per_device_train_batch_size": config.micro_batch_size_per_gpu,
         "max_seq_length": config.max_seq_len,
@@ -65,19 +71,59 @@ def _map_to_trl_config(result: MemoryResult) -> dict:
     return trl_args
 
 
+def load_trl_strategy_config(path: str | Path) -> dict[str, Any]:
+    """Load TRL strategy args written by SimpleSFT (YAML, or JSON as YAML 1.2).
+
+    Args:
+        path: Path to a YAML file containing one mapping, or a single-element list
+            whose only element is that mapping (exported batch format).
+
+    Returns:
+        One TRL strategy dictionary (``run_sft`` / ``SFTTrainer`` kwargs subset).
+    """
+
+    raw_text = Path(path).read_text(encoding="utf-8")
+    config_data = yaml.safe_load(raw_text)
+    if isinstance(config_data, list):
+        if len(config_data) == 0:
+            raise ValueError("Config file contains an empty list.")
+        config_data = config_data[0]
+    if not isinstance(config_data, dict):
+        raise TypeError("TRL strategy config must be a mapping or a one-element list of mappings.")
+    return config_data
+
+
+_YAML_DUMP_KWARGS = dict(
+    default_flow_style=False,
+    sort_keys=False,
+    allow_unicode=True,
+)
+
+
+def trl_strategy_payload_to_yaml(config: dict[str, Any]) -> str:
+    """Format one strategy dict like the web download (a single-element YAML list)."""
+
+    return yaml.safe_dump([config], **_YAML_DUMP_KWARGS)
+
+
+def trl_candidates_to_yaml_document(candidates: Iterable[MemoryResult]) -> str:
+    """Serialize candidates to a YAML document (list of mappings)."""
+
+    payload = [_map_to_trl_config(c) for c in candidates]
+    return yaml.safe_dump(payload, **_YAML_DUMP_KWARGS)
+
+
 def export_candidates_to_trl(
-    candidates: Iterable[MemoryResult], 
+    candidates: Iterable[MemoryResult],
     export_path: str,
 ) -> None:
-    """Export viable candidate strategies to a JSON file for Hub/TRL ingestion.
-    
+    """Export viable candidate strategies to a YAML file for Hub/TRL ingestion.
+
     Args:
-        candidates: A list of candidate memory results to export.
-        export_path: The file path to write the JSON payload to.
+        candidates: Candidate memory results to export.
+        export_path: File path to write the YAML payload to.
     """
-    
-    payload = [_map_to_trl_config(c) for c in candidates]
-    
-    with open(export_path, "w") as f:
-        json.dump(payload, f, indent=2)
+
+    text = trl_candidates_to_yaml_document(candidates)
+    Path(export_path).write_text(text, encoding="utf-8")
 

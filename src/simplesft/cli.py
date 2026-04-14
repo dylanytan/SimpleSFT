@@ -398,8 +398,11 @@ def main() -> None:
     web_parser.add_argument("--no-browser", action="store_true")
 
     train_parser = subparsers.add_parser("train")
-    train_parser.add_argument("--config", required=True, help="Path to JSON config exported from SimpleSFT")
-    train_parser.add_argument("--model", required=True, help="Model ID or path (e.g., 'meta-llama/Llama-2-7b-hf')")
+    train_parser.add_argument("--config", required=True, help="Path to YAML config exported from SimpleSFT")
+    train_parser.add_argument(
+        "--model",
+        help="Model ID or path (otherwise read from config 'model')",
+    )
     train_parser.add_argument("--dataset", required=True, help="Dataset ID or path (e.g., 'timdettmers/openassistant-guanaco')")
     train_parser.add_argument("--dataset-config", help="Dataset configuration string (e.g., 'en' for subsets)")
     train_parser.add_argument(

@@ -17,7 +17,7 @@ from ..estimator.estimate import estimate_peak_memory
 from ..models.inspect import inspect_model
 from ..models.model_catalog import catalog_entry_for_model_id
 from ..models.precomputed_model_specs import resolve_model_spec
-from ..results.export import _map_to_trl_config
+from ..results.export import _map_to_trl_config, trl_strategy_payload_to_yaml
 from ..types import EstimatorConfig, LoRAConfig, MemoryResult, ModelSpec
 from .assets import APP_HTML
 
@@ -104,6 +104,17 @@ def _json_response(
     handler.send_header("Content-Length", str(len(content)))
     handler.end_headers()
     handler.wfile.write(content)
+
+
+def _yaml_text_response(*, handler: BaseHTTPRequestHandler, text: str) -> None:
+    """Write a UTF-8 YAML document to the client."""
+
+    body = text.encode("utf-8")
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "text/yaml; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
 
 
 def _html_response(*, handler: BaseHTTPRequestHandler, content: str) -> None:
@@ -715,7 +726,23 @@ def build_request_handler(
             )
 
         def do_POST(self) -> None:  # noqa: N802
-            """Handle estimate requests."""
+            """Handle estimate and TRL YAML export requests."""
+
+            if self.path == "/api/trl-config-yaml":
+                try:
+                    payload = _read_json_payload(handler=self)
+                    cfg = payload.get("config")
+                    if not isinstance(cfg, dict):
+                        raise ValueError("Request body must include a JSON object 'config'.")
+                    text = trl_strategy_payload_to_yaml(cfg)
+                    _yaml_text_response(handler=self, text=text)
+                except Exception as exc:
+                    _json_response(
+                        handler=self,
+                        status=HTTPStatus.BAD_REQUEST,
+                        payload={"error": str(exc)},
+                    )
+                return
 
             if self.path != "/api/estimate":
                 _json_response(

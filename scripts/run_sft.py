@@ -2,7 +2,6 @@
 """Run Hugging Face TRL SFTTrainer using a SimpleSFT exported strategy config."""
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -18,13 +17,14 @@ _src = Path(__file__).resolve().parents[1] / "src"
 if _src.is_dir():
     sys.path.insert(0, str(_src))
 
+from simplesft.results.export import load_trl_strategy_config
 from simplesft.sft_auto_format import resolve_sft_data_format
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run SFT using a SimpleSFT exported strategy config")
-    parser.add_argument("--config", required=True, help="Path to JSON config exported from SimpleSFT")
-    parser.add_argument("--model", required=True, help="Model ID or path (e.g., 'meta-llama/Llama-2-7b-hf')")
+    parser.add_argument("--config", required=True, help="Path to YAML config exported from SimpleSFT")
+    parser.add_argument("--model", help="Model ID or path (otherwise read from config 'model')")
     parser.add_argument("--dataset", required=True, help="Dataset ID or path (e.g., 'timdettmers/openassistant-guanaco')")
     parser.add_argument(
         "--dataset-config",
@@ -62,14 +62,10 @@ def main():
 
     # Load config
     print(f"Loading strategy config from '{args.config}'...")
-    with open(args.config, "r") as f:
-        config_data = json.load(f)
-
-    # Some configs might be exported as a list of dicts. If so, take the first one.
-    if isinstance(config_data, list):
-        if len(config_data) == 0:
-            raise ValueError("Config file contains an empty list.")
-        config_data = config_data[0]
+    config_data = load_trl_strategy_config(args.config)
+    model_id = args.model or config_data.get("model")
+    if not model_id:
+        parser.error("Missing model. Provide --model or include a top-level 'model' in the config.")
 
     # Extract TRL SFTConfig arguments
     max_seq_length = config_data.get("max_seq_length", 1024)
@@ -117,12 +113,12 @@ def main():
     )
     print(f"SFT dataset layout: {format_desc}")
 
-    print(f"Loading tokenizer '{args.model}'...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    print(f"Loading tokenizer '{model_id}'...")
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
     if not tokenizer.pad_token:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"Loading model '{args.model}'...")
+    print(f"Loading model '{model_id}'...")
     torch_dtype = torch.bfloat16 if bf16 else (torch.float16 if fp16 else torch.float32)
     
     model_kwargs = {
@@ -131,7 +127,7 @@ def main():
     }
     
     model = AutoModelForCausalLM.from_pretrained(
-        args.model,
+        model_id,
         **model_kwargs
     )
     if gradient_checkpointing:

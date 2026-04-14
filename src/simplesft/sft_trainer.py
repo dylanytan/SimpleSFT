@@ -1,6 +1,5 @@
 """Run Hugging Face TRL SFTTrainer using a SimpleSFT exported strategy config."""
 
-import json
 import torch
 import warnings
 from typing import Optional
@@ -9,12 +8,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 from trl import SFTConfig, SFTTrainer
 
+from .results.export import load_trl_strategy_config
 from .sft_auto_format import resolve_sft_data_format
 
 
 def run_sft(
     config_path: str,
-    model_id: str,
+    model_id: Optional[str],
     dataset_id: str,
     dataset_config: str = None,
     dataset_text_field: str = "text",
@@ -24,14 +24,12 @@ def run_sft(
 ):
     """Run SFT given a dataset and a SimpleSFT exported strategy config."""
     print(f"Loading strategy config from '{config_path}'...")
-    with open(config_path, "r") as f:
-        config_data = json.load(f)
-
-    # Some configs might be exported as a list of dicts. If so, take the first one.
-    if isinstance(config_data, list):
-        if len(config_data) == 0:
-            raise ValueError("Config file contains an empty list.")
-        config_data = config_data[0]
+    config_data = load_trl_strategy_config(config_path)
+    resolved_model_id = model_id or config_data.get("model")
+    if not resolved_model_id:
+        raise ValueError(
+            "Missing model. Provide --model or include a top-level 'model' field in the config."
+        )
 
     # Extract TRL SFTConfig arguments
     max_seq_length = config_data.get("max_seq_length", 1024)
@@ -79,12 +77,12 @@ def run_sft(
     )
     print(f"SFT dataset layout: {format_desc}")
 
-    print(f"Loading tokenizer '{model_id}'...")
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    print(f"Loading tokenizer '{resolved_model_id}'...")
+    tokenizer = AutoTokenizer.from_pretrained(resolved_model_id)
     if not tokenizer.pad_token:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"Loading model '{model_id}'...")
+    print(f"Loading model '{resolved_model_id}'...")
     torch_dtype = torch.bfloat16 if bf16 else (torch.float16 if fp16 else torch.float32)
     
     model_kwargs = {
@@ -93,7 +91,7 @@ def run_sft(
     }
     
     model = AutoModelForCausalLM.from_pretrained(
-        model_id,
+        resolved_model_id,
         **model_kwargs
     )
     if gradient_checkpointing:
